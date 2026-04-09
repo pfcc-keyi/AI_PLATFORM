@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 AVAILABLE_FLOWS = {
     "general_enquiry": "Ask questions about the data platform, tables, actions, concepts",
-    "party_onboarding": "Create a new party (CORP or PERSON) via the create_party handler",
+    "handler_execution": "Execute a business handler/workflow on the data platform (e.g. create_party)",
     "data_query": "Query data from platform tables (list, get_by_pk, count, exists)",
     "upsert": "Insert or update records in platform tables via actions",
 }
@@ -204,7 +204,7 @@ class OpsSession:
         handlers = {
             "general_enquiry": self._run_general_enquiry,
             "data_query": self._run_data_query,
-            "party_onboarding": self._run_party_onboarding,
+            "handler_execution": self._run_handler_execution,
             "upsert": self._run_upsert,
         }
         handler = handlers.get(flow)
@@ -241,10 +241,10 @@ class OpsSession:
 
         return handle_query(message, self.state.messages, self.state.context)
 
-    def _run_party_onboarding(self, message: str) -> ChatResponse:
-        from flows.business.party_onboarding import handle_onboarding
+    def _run_handler_execution(self, message: str) -> ChatResponse:
+        from flows.business.handler_execution import handle_execution
 
-        resp = handle_onboarding(message, self.state.messages, self.state.context)
+        resp = handle_execution(message, self.state.messages, self.state.context)
         if resp.confirm_data:
             self.state.pending_action = resp.confirm_data
         return resp
@@ -263,8 +263,8 @@ class OpsSession:
 
     def _execute_confirmed(self, action: ConfirmAction) -> ChatResponse:
         try:
-            if action.flow == "party_onboarding":
-                from flows.business.party_onboarding import execute_confirmed
+            if action.flow == "handler_execution":
+                from flows.business.handler_execution import execute_confirmed
 
                 resp = execute_confirmed(action)
             elif action.flow == "upsert":

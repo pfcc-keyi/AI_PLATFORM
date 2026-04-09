@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 class IntentClassification(BaseModel):
     intent: str = Field(
         description=(
-            "One of: general_enquiry, party_onboarding, data_query, upsert, "
+            "One of: general_enquiry, handler_execution, data_query, upsert, "
             "continue, unclear"
         )
     )

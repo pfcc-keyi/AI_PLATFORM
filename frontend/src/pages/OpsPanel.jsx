@@ -787,7 +787,7 @@ export default function OpsPanel() {
 
   const flowGreetings = {
     general_enquiry: "I have a question about the data platform",
-    party_onboarding: "I want to create a new party",
+    handler_execution: "I want to execute a business handler",
     data_query: "I want to query some data",
     upsert: "I want to insert or update some records",
   };
@@ -833,7 +833,7 @@ export default function OpsPanel() {
       <div className="ops-messages" style={s.messages}>
         {messages.length === 0 && (
           <div style={{ color: "#666", textAlign: "center", margin: "auto 0", padding: "2rem 1rem" }}>
-            Ask a question about your data, create a party, query records, or
+            Ask a question about your data, execute a business handler, query records, or
             insert/update data.
           </div>
         )}

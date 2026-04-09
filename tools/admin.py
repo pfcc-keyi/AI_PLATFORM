@@ -188,6 +188,24 @@ class DPAPICatalogTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
+# List Handler Files
+# ---------------------------------------------------------------------------
+
+class ListHandlerFilesTool(BaseTool):
+    name: str = "list_handler_files"
+    description: str = (
+        "List all available handler files on the data platform. "
+        "Returns {success: true, files: ['create_party.py', ...]}. "
+        "Use this to show the user which business handlers are available for execution."
+    )
+
+    def _run(self) -> str:
+        url = f"{DATA_PLATFORM_URL}/api/admin/files/handlers"
+        resp = httpx.get(url, headers=_admin_headers(), timeout=30)
+        return resp.text
+
+
+# ---------------------------------------------------------------------------
 # File Write
 # ---------------------------------------------------------------------------
 

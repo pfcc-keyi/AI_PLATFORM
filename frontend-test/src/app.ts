@@ -55,7 +55,7 @@ type DomRefs = {
 
 const FLOW_GREETINGS: Record<string, string> = {
   general_enquiry: 'I have a question about the data platform',
-  party_onboarding: 'I want to create a new party',
+  handler_execution: 'I want to execute a business handler',
   data_query: 'I want to query some data',
   upsert: 'I want to insert or update some records',
 }
