@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Platform — Ops</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; overflow: hidden; }
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: #08090c;
+        color: #e5e5e5;
+      }
+      #app {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ── Top bar ── */
+      #top-bar {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        padding: 0 28px;
+        height: 54px;
+        gap: 12px;
+        background: linear-gradient(180deg, #101218 0%, #0c0d12 100%);
+        border-bottom: 1px solid #1a1c24;
+        position: relative;
+      }
+      #top-bar::after {
+        content: '';
+        position: absolute;
+        bottom: -1px;
+        left: 0; right: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #2563eb33, transparent);
+      }
+      #top-bar .title {
+        font-weight: 700;
+        font-size: 15px;
+        color: #f0f0f0;
+        letter-spacing: -0.01em;
+        margin-right: auto;
+      }
+      #top-bar .title-dot {
+        display: inline-block;
+        width: 7px; height: 7px;
+        border-radius: 50%;
+        background: #22c55e;
+        margin-right: 8px;
+        vertical-align: middle;
+        box-shadow: 0 0 6px #22c55e66;
+      }
+      #flow-badge {
+        display: none;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 10px;
+        border-radius: 6px;
+        background: #1e293b;
+        color: #60a5fa;
+        border: 1px solid #1e3a5f44;
+        letter-spacing: 0.02em;
+      }
+      #clear-btn {
+        display: none;
+        padding: 5px 14px;
+        border-radius: 6px;
+        border: 1px solid #2a2d38;
+        background: #14161e;
+        color: #888;
+        font-size: 12px;
+        cursor: pointer;
+        font-weight: 500;
+        font-family: inherit;
+        transition: all 0.15s;
+      }
+      #clear-btn:hover { border-color: #3b3f4e; color: #bbb; background: #1a1d28; }
+
+      /* ── Canvas ── */
+      #chat-canvas {
+        flex: 1;
+        width: 100%;
+        min-height: 0;
+        display: block;
+        cursor: default;
+      }
+
+      /* ── Input bar ── */
+      #input-bar {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 28px 14px;
+        background: linear-gradient(180deg, #0c0d12 0%, #08090c 100%);
+        border-top: 1px solid #1a1c24;
+        position: relative;
+        transition: padding 0.15s;
+      }
+      #input-bar::before {
+        content: '';
+        position: absolute;
+        top: -1px;
+        left: 0; right: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #2563eb22, transparent);
+      }
+      #input-wrap {
+        flex: 1;
+        position: relative;
+      }
+      #msg-input {
+        width: 100%;
+        padding: 12px 16px;
+        border-radius: 12px;
+        border: 1px solid #1e2030;
+        background: #12141c;
+        color: #e5e5e5;
+        font-size: 14px;
+        font-family: inherit;
+        outline: none;
+        transition: border-color 0.2s, box-shadow 0.2s;
+      }
+      #msg-input:focus {
+        border-color: #2563eb88;
+        box-shadow: 0 0 0 3px #2563eb18, 0 0 20px #2563eb0a;
+      }
+      #msg-input::placeholder { color: #444a5c; }
+      #msg-input:disabled { opacity: 0.5; }
+      #send-btn {
+        padding: 12px 24px;
+        border-radius: 12px;
+        border: none;
+        background: linear-gradient(135deg, #2563eb, #3b82f6);
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        font-size: 14px;
+        white-space: nowrap;
+        font-family: inherit;
+        transition: all 0.2s;
+        box-shadow: 0 2px 8px #2563eb33;
+        letter-spacing: 0.01em;
+      }
+      #send-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
+        box-shadow: none;
+      }
+      #send-btn:not(:disabled):hover {
+        background: linear-gradient(135deg, #3b82f6, #60a5fa);
+        box-shadow: 0 4px 16px #2563eb44;
+        transform: translateY(-1px);
+      }
+      #send-btn:not(:disabled):active {
+        transform: translateY(0);
+        box-shadow: 0 1px 4px #2563eb33;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="top-bar">
+        <span class="title"><span class="title-dot"></span>Operations</span>
+        <span id="flow-badge"></span>
+        <button id="clear-btn">Clear</button>
+      </div>
+      <canvas id="chat-canvas"></canvas>
+      <div id="input-bar">
+        <div id="input-wrap">
+          <input id="msg-input" type="text" placeholder="Type a message..." autocomplete="off" />
+        </div>
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

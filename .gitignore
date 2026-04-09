@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# CrewAI storage
+.crewai_storage/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Frontend test
+frontend-test/node_modules/
+frontend-test/dist/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

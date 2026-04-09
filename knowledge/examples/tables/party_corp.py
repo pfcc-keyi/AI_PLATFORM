@@ -1,0 +1,125 @@
+from lib import (
+    ActionDef,
+    ColumnDef,
+    FKDefinition,
+    PKConfig,
+    StateTransition,
+    TableConfig,
+)
+
+config = TableConfig(
+    table_name="party_corp",
+    pk_field="party_id",
+    pk_config=PKConfig(strategy="custom", generator=lambda data: data["party_id"]),
+    states=["draft", "active", "disabled"],
+    transitions=[
+        StateTransition(from_state="init", to_state="draft"),
+        StateTransition(from_state="init", to_state="active"),
+        StateTransition(from_state="draft", to_state="draft"),
+        StateTransition(from_state="draft", to_state="active"),
+        StateTransition(from_state="active", to_state="active"),
+        StateTransition(from_state="active", to_state="disabled"),
+        StateTransition(from_state="disabled", to_state="deleted"),
+    ],
+    columns=[
+        ColumnDef(name="party_id",                pg_type="text",    nullable=False),
+        ColumnDef(name="legal_form",              pg_type="text",    nullable=False),
+        ColumnDef(name="entity_name",             pg_type="text",    nullable=False,  check="char_length(entity_name) > 2"),
+        ColumnDef(name="country_of_domicile",     pg_type="text",    nullable=False),
+        ColumnDef(name="country_of_incorporation",pg_type="text",    nullable=True),
+        ColumnDef(name="listed_ind",              pg_type="boolean", nullable=False),
+        ColumnDef(name="market_id",               pg_type="text",    nullable=True),
+        ColumnDef(name="isin_code",               pg_type="text",    nullable=True),
+        ColumnDef(name="industry_type",           pg_type="text",    nullable=True),
+        ColumnDef(name="state",                   pg_type="text",    nullable=False),
+    ],
+    fk_definitions=[
+        FKDefinition(
+            field="party_id",
+            referenced_table="party",
+            referenced_field="party_id",
+            on_update="CASCADE",
+            on_delete="CASCADE",
+        ),
+        FKDefinition(
+            field="legal_form",
+            referenced_table="legal_form_list",
+            referenced_field="legal_form_code",
+            on_update="CASCADE",
+            on_delete="RESTRICT",
+        ),
+        FKDefinition(
+            field="country_of_domicile",
+            referenced_table="country",
+            referenced_field="country_code",
+            on_update="CASCADE",
+            on_delete="RESTRICT",
+        ),
+        FKDefinition(
+            field="country_of_incorporation",
+            referenced_table="country",
+            referenced_field="country_code",
+            on_update="CASCADE",
+            on_delete="RESTRICT",
+        ),
+        FKDefinition(
+            field="industry_type",
+            referenced_table="industry_type_list",
+            referenced_field="type",
+            on_update="CASCADE",
+            on_delete="RESTRICT",
+        ),
+    ],
+    actions=[
+        ActionDef(
+            name="create_party_corp_draft",
+            function_type="insert",
+            transition=StateTransition(from_state="init", to_state="draft"),
+        ),
+        ActionDef(
+            name="create_party_corp_active",
+            function_type="insert",
+            transition=StateTransition(from_state="init", to_state="active"),
+        ),
+        ActionDef(
+            name="create_party_corp_bulk",
+            function_type="bulk_insert",
+            transition=StateTransition(from_state="init", to_state="active"),
+        ),
+        ActionDef(
+            name="update_party_corp_draft",
+            function_type="update",
+            transition=StateTransition(from_state="draft", to_state="draft"),
+        ),
+        ActionDef(
+            name="activate_party_corp",
+            function_type="update",
+            transition=StateTransition(from_state="draft", to_state="active"),
+        ),
+        ActionDef(
+            name="party_corp_update",
+            function_type="update",
+            transition=StateTransition(from_state="active", to_state="active"),
+        ),
+        ActionDef(
+            name="disable_party_corp",
+            function_type="update",
+            transition=StateTransition(from_state="active", to_state="disabled"),
+        ),
+        ActionDef(
+            name="disable_party_corp_bulk",
+            function_type="bulk_update",
+            transition=StateTransition(from_state="active", to_state="disabled"),
+        ),
+        ActionDef(
+            name="delete_party_corp",
+            function_type="delete",
+            transition=StateTransition(from_state="disabled", to_state="deleted"),
+        ),
+        ActionDef(
+            name="delete_party_corp_bulk",
+            function_type="bulk_delete",
+            transition=StateTransition(from_state="disabled", to_state="deleted"),
+        ),
+    ],
+)

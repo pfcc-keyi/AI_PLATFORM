@@ -1,0 +1,21 @@
+[project]
+name = "ai-platform"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "crewai",
+    "crewai-tools",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "httpx>=0.28",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+]
+
+[tool.uv.sources]
+crewai = { path = "source/crewai", editable = true }
+crewai-tools = { path = "source/crewai-tools", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
