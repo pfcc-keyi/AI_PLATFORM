@@ -119,18 +119,22 @@ Protected by `API_TOKEN` when set. Include `Authorization: Bearer <token>` in re
 
 ### Admin Endpoints (operations)
 
-All admin endpoints are protected by `ADMIN_TOKEN` when set. Include `Authorization: Bearer <token>` in requests.
+When `ADMIN_TOKEN` is set, write/validate endpoints require `Authorization: Bearer <token>`.
+Read-only catalog endpoints (`/api/admin/schema-catalog`, `/api/admin/api-catalog`, `/api/admin/api-catalog/{table}`) are currently accessible without `ADMIN_TOKEN`.
 
 | Method | Path | Description | Response |
 |--------|------|-------------|----------|
 | `POST` | `/api/admin/reload` | Trigger hot reload (scan -> diff -> execute) | JSON: reload result |
 | `GET` | `/api/admin/schema-catalog` | Read-only snapshot of all registered table configs and handlers | JSON: full schema |
 | `PUT` | `/api/admin/files/{category}/{filename}` | Write/overwrite a `.py` file | JSON: `{"success": true, "path": "tables/x.py"}` |
+| `DELETE` | `/api/admin/files/{category}/{filename}` | Delete a `.py` file from the volume | JSON: `{"success": true, "deleted": "tables/x.py"}` |
 | `GET` | `/api/admin/files/{category}` | List all `.py` files in `tables/` or `handlers/` | JSON: `{"files": ["a.py", "b.py"]}` |
 | `GET` | `/api/admin/files/{category}/{filename}` | Read a single file's content | JSON: `{"filename": "x.py", "content": "..."}` |
 | `GET` | `/api/admin/workspace/download` | Download entire workspace as zip | Binary: `workspace.zip` |
 | `GET` | `/api/admin/api-catalog` | List all callable action + handler APIs with full URLs | JSON: actions + handlers |
 | `GET` | `/api/admin/api-catalog/{table}` | List all APIs for a table (actions + queries) with full URLs | JSON: endpoints list |
+| `POST` | `/api/admin/validate-table` | Validate table config source code against live registry | JSON: `{"valid": bool, "errors": [...], "warnings": [...]}` |
+| `POST` | `/api/admin/validate-handler` | Validate handler source code against live registry | JSON: `{"valid": bool, "errors": [...], "warnings": [...]}` |
 
 URLs in the API catalog auto-adapt: `http://localhost:8000` locally, `https://your-domain.up.railway.app` on Railway, or `http://service.railway.internal:PORT` via private network. After hot reload, newly added tables/handlers appear immediately in the catalog.
 
@@ -138,7 +142,7 @@ URLs in the API catalog auto-adapt: `http://localhost:8000` locally, `https://yo
 - Filename must end with `.py`
 - No path traversal (`..`, `/`, `\`)
 - Filenames starting with `_` are reserved (the scanner skips them)
-- No DELETE endpoint -- the hot reload system is append-only by design
+- `DELETE` removes the file from the volume. Trigger `POST /api/admin/reload` afterward -- the reload detects that the file is gone and **deregisters the table/handler from memory**. The corresponding PostgreSQL table is **not** dropped -- only the in-memory registration is removed
 
 ---
 
@@ -156,7 +160,8 @@ URLs in the API catalog auto-adapt: `http://localhost:8000` locally, `https://yo
 
 **Two-token authentication:**
 
-- `ADMIN_TOKEN` protects admin operations: hot reload, file management, schema catalog, API catalog, workspace download.
+- `ADMIN_TOKEN` protects mutating/validation admin operations: hot reload, file management, workspace download, validate-table, validate-handler.
+- `schema-catalog` and `api-catalog` endpoints are read-only and currently do not enforce `ADMIN_TOKEN`.
 - `API_TOKEN` protects business operations: actions, queries, handlers, task polling.
 - Both tokens are optional. When not set (e.g., local development), no authentication is required.
 - On Railway, both should be set to prevent unauthorized access via the public domain.

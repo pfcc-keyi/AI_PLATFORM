@@ -290,6 +290,28 @@ function ReviewSummary({ summary, defaultView = "table" }) {
               </table>
             </div>
           )}
+
+          {!isHandler && summary.table_constraints?.length > 0 && (
+            <div style={{ marginTop: "0.75rem" }}>
+              <span style={styles.label}>Table Constraints</span>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>#</th>
+                    <th style={styles.th}>SQL Expression</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.table_constraints.map((expr, i) => (
+                    <tr key={i}>
+                      <td style={{ ...styles.td, width: 48 }}>{i + 1}</td>
+                      <td style={{ ...styles.td, fontFamily: "monospace" }}>{expr}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </>
       )}
     </div>

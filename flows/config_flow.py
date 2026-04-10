@@ -38,6 +38,7 @@ from models.config_models import (
     _FK_ACTION_NORMALIZE,
 )
 from setup.knowledge_setup import (
+    get_docs_knowledge,
     get_handler_knowledge,
     get_schema_knowledge,
     refresh_schema_knowledge,
@@ -229,8 +230,11 @@ class ConfigFlow(Flow[ConfigState]):
     def _analyze_handler_requirement(self):
         """Run handler-specific analysis agent producing RequirementAnalysis with HandlerDesign."""
         knowledge_sources = []
+        docs = get_docs_knowledge()
         schema = get_schema_knowledge()
         handler_k = get_handler_knowledge()
+        if docs:
+            knowledge_sources.append(docs)
         if schema:
             knowledge_sources.append(schema)
         if handler_k:
@@ -357,7 +361,7 @@ class ConfigFlow(Flow[ConfigState]):
             goal="Analyze the requirement: extract what's given, ask about missing design decisions, or produce a complete SchemaDesign",
             backstory=(
                 "You produce SchemaDesign objects for the Data Platform's TableConfig system.\n"
-                "A TableConfig has 7 elements: table_name, pk, states, transitions, columns, fk_definitions, actions.\n\n"
+                "A TableConfig has 8 elements: table_name, pk, states, transitions, columns, fk_definitions, actions, table_constraints.\n\n"
                 "PLATFORM RULES (absolute, never violate):\n"
                 "1. 'init' and 'deleted' are VIRTUAL states — NEVER put them in the states list.\n"
                 "   states list = only REAL states stored in DB (e.g. ['active','disabled']).\n"
@@ -382,6 +386,10 @@ class ConfigFlow(Flow[ConfigState]):
                 "- User PROVIDED (columns, types, FK target, PK field, any explicitly mentioned constraints) → extract directly, never re-ask.\n"
                 "- User MENTIONED a validation rule → apply as PostgreSQL check= constraint in ColumnDef.\n"
                 "  Examples: 'name > 2 chars' → check='char_length(name) > 2', 'amount >= 0' → check='amount >= 0'\n"
+                "- User MENTIONED cross-column constraints → use table_constraints (e.g. "
+                "'start_date <= end_date' or 'approver_a <> approver_b').\n"
+                "  For nullable fields prefer safe SQL patterns like "
+                "'start_date IS NULL OR end_date IS NULL OR start_date <= end_date'.\n"
                 "- User did NOT mention constraints for a column → leave check=None, default_expr=None, unique=False.\n"
                 "- If user ALREADY ANSWERED in 'Previous clarifications' → extract the answer, do NOT re-ask.\n"
                 "- Design decisions NOT provided AND NOT already answered → set missing_info=true and ASK:\n"
@@ -415,6 +423,9 @@ class ConfigFlow(Flow[ConfigState]):
             "  - Table name, columns, types, FK target table, PK field\n"
             "  - Any validation rules user explicitly mentioned → apply as PostgreSQL check= in ColumnDef\n"
             "    Example: 'name > 2 chars' → check='char_length(name) > 2' (NOT <= 2!)\n"
+            "  - Any cross-column invariants user explicitly mentioned → put them in table_constraints\n"
+            "    Example: start_date <= end_date → "
+            "'start_date IS NULL OR end_date IS NULL OR start_date <= end_date'\n"
             "  - FK target: if user says 'FK from party table' → references_table='party'. "
             "Use dp_name_resolve ONLY for FK target tables to verify they exist.\n\n"
             "STEP 2 — CHECK what design decisions are MISSING:\n"
@@ -460,7 +471,11 @@ class ConfigFlow(Flow[ConfigState]):
             "     - bulk_insert: bulk_create_{table}\n"
             "     - bulk_update: same transition as its single counterpart\n"
             "     - bulk_delete: bulk_delete_{table}\n\n"
-            "  H) table_constraints: leave empty (constraints go in ColumnDef.check, not here)\n\n"
+            "  H) table_constraints: list SQL boolean expressions ONLY for cross-column constraints.\n"
+            "     - Single-column rules belong in ColumnDef.check\n"
+            "     - Preserve user intent exactly; do NOT invent extra constraints\n"
+            "     - For nullable columns, prefer safe patterns with IS NULL OR ...\n"
+            "     - Leave empty only when no cross-column constraints were requested\n\n"
             "CRITICAL: design MUST be populated when missing_info=false. design MUST be null when missing_info=true."
         )
 
@@ -554,9 +569,9 @@ class ConfigFlow(Flow[ConfigState]):
                 "5. delete/bulk_delete: to_state='deleted'\n"
                 "6. ONE action per transition. Bulk actions only if user requested.\n"
                 "7. states = unique real states from transitions (exclude init/deleted)\n"
-                "8. Do NOT invent check/default_expr/unique unless user explicitly asked\n"
+                "8. Do NOT invent check/default_expr/unique/table_constraints unless user explicitly asked\n"
                 "9. If user says 'name > 2 chars' → check='char_length(name) > 2' (greater than, NOT less than)\n"
-                "10. table_constraints: leave empty\n"
+                "10. Use table_constraints only for cross-column invariants; keep empty if none were requested\n"
                 "11. PK fields already imply NOT NULL + UNIQUE — NEVER add these as constraints on a PK column"
             ),
             tools=[],
@@ -642,7 +657,7 @@ class ConfigFlow(Flow[ConfigState]):
                 "- If a transition is removed: remove the action for that transition\n"
                 "- If a transition is added: add exactly one action with correct function_type\n"
                 "- states list = unique real states from transitions (exclude init/deleted)\n"
-                "- NEVER add check, default_expr, or unique unless user explicitly requests\n"
+                "- NEVER add check, default_expr, unique, or table_constraints unless user explicitly requests\n"
                 "- PK fields already imply NOT NULL + UNIQUE — NEVER add these as constraints on a PK column\n"
                 "- Only change what user asks; keep everything else identical"
             ),
@@ -661,8 +676,8 @@ class ConfigFlow(Flow[ConfigState]):
             "2. After changes, verify: states = unique real states from transitions (no init/deleted)\n"
             "3. Every transition must have exactly one action with correct function_type:\n"
             "   from_state='init' → insert, to_state='deleted' → delete, else → update\n"
-            "4. Do NOT add check/default_expr/unique unless user explicitly asks\n"
-            "5. table_constraints should be empty (constraints belong in ColumnDef.check)"
+            "4. Do NOT add check/default_expr/unique/table_constraints unless user explicitly asks\n"
+            "5. For constraints: single-column rules in ColumnDef.check; table_constraints only for cross-column rules"
         )
 
         result = reviser.kickoff(prompt, response_format=SchemaDesign)
@@ -916,7 +931,10 @@ class ConfigFlow(Flow[ConfigState]):
             return None
 
         knowledge_sources = []
+        docs = get_docs_knowledge()
         handler_k = get_handler_knowledge()
+        if docs:
+            knowledge_sources.append(docs)
         if handler_k:
             knowledge_sources.append(handler_k)
 
@@ -1213,6 +1231,7 @@ class ConfigFlow(Flow[ConfigState]):
                 }
                 for fk in design.fk_definitions
             ],
+            "table_constraints": design.table_constraints,
         }
 
     def _build_handler_design_summary(self) -> dict[str, Any]:
@@ -1225,7 +1244,7 @@ class ConfigFlow(Flow[ConfigState]):
                 "pk_field": "sync", "pk_strategy": "sync",
                 "pk_generator_description": "",
                 "states": [], "transitions": [],
-                "columns": [], "actions": [], "fk_definitions": [],
+                "columns": [], "actions": [], "fk_definitions": [], "table_constraints": [],
             }
 
         return {
@@ -1263,6 +1282,7 @@ class ConfigFlow(Flow[ConfigState]):
                 {"field": "uses", "references_table": t, "references_field": ""}
                 for t in hd.tables_used
             ],
+            "table_constraints": [],
         }
 
     def _build_review_response(self) -> dict[str, Any]:

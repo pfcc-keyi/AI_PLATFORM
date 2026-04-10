@@ -116,12 +116,15 @@ Six internal-only functions (`insert`, `update`, `delete`, `bulk_insert`, `bulk_
 The pipeline that makes base functions safe and usable. For every action call:
 
 1. Look up `ActionDef` to determine function type and state transition
-2. Generate PK (for inserts) via `action/pk.py`; for custom PK strategy, retry up to `retry_on_conflict` times on UNIQUE violation (attempt INSERT, catch error, regenerate PK)
-3. Inject `state = to_state` into data
-4. Build CAS predicate `WHERE state = from_state` (for updates/deletes)
-5. Call the bound base function
-6. Catch DB constraint errors and translate via `action/error_translator.py` (including `DB_ERROR` fallback for unrecognized errors and `INTERNAL_ERROR` for unexpected failures)
-7. Manage transaction (auto-commit if standalone, skip if inside handler)
+2. **Input type coercion** via `TypeCoercer.coerce_input()` -- convert JSON values to Python types based on `ColumnDef.pg_type` (e.g., date strings -> `date`, `"true"` -> `True`)
+3. **Condition coercion** (bulk operations) via `TypeCoercer.coerce_conditions()` -- same conversion for filter values
+4. Generate PK (for inserts) via `action/pk.py`; for custom PK strategy, retry up to `retry_on_conflict` times on UNIQUE violation (attempt INSERT, catch error, regenerate PK)
+5. Inject `state = to_state` into data
+6. Build CAS predicate `WHERE state = from_state` (for updates/deletes)
+7. Call the bound base function
+8. **Output type coercion** via `TypeCoercer.coerce_output()` -- convert asyncpg return values to JSON-safe types (e.g., `date` -> ISO string, `Decimal` -> float, `datetime` -> space-separated ISO)
+9. Catch DB constraint errors and translate via `action/error_translator.py` (including `DB_ERROR` fallback for unrecognized errors and `INTERNAL_ERROR` for unexpected failures); type coercion `ValueError` is caught and translated to `ActionError(code=INVALID_INPUT)`
+10. Manage transaction (auto-commit if standalone, skip if inside handler)
 
 **Files:**
 
@@ -129,10 +132,13 @@ The pipeline that makes base functions safe and usable. For every action call:
 - `action/pk.py` -- PK generation (uuid4, sequence, custom callable)
 - `action/error_translator.py` -- DB exception -> structured `ActionError`
 - `table/state_machine.py` -- CAS predicate builders
+- `table/coerce.py` -- `TypeCoercer` (input/output/condition coercion driven by `ColumnDef.pg_type`)
 
 ### Layer 5: Query Executor (`query/executor.py`)
 
 Four built-in read-only methods per table: `get_by_pk`, `list`, `count`, `exists`. Auto-generated on table registration. No `ActionDef` needed. Supports column selection, filtering (including `IN`, `NOT IN`, `LIKE`, `ILIKE`, `IS NULL`, `IS NOT NULL`), ordering, pagination.
+
+Condition values are coerced via `TypeCoercer.coerce_conditions()` (e.g., date strings in filters become `date` objects for asyncpg). Returned rows are coerced via `TypeCoercer.coerce_output()` to ensure JSON-safe values (e.g., `date` -> ISO string, `Decimal` -> float).
 
 ### Layer 6: Table Handle (`table/table_handle.py`)
 
@@ -163,7 +169,7 @@ Central coordinator. `register_table()` validates config, optionally creates the
 
 ### Layer 9: HTTP Layer (`api/`)
 
-Thin FastAPI wrappers. Route groups mounted on the app:
+Thin FastAPI wrappers. `create_app()` mounts action/query/handler/task routes by default; workspace apps can additionally mount admin routes (`api/routes/admin.py`):
 
 - `POST /api/actions/{table}/{action}` -- calls `TableHandle.{action}(**body)` with granular HTTP status codes per error type
 - `POST /api/queries/{table}/{method}` -- calls `TableHandle.{method}(**body)`
@@ -172,11 +178,14 @@ Thin FastAPI wrappers. Route groups mounted on the app:
 - `POST /api/admin/reload` -- production hot reload with append-only safety checks and rollback isolation
 - `GET /api/admin/schema-catalog` -- read-only schema catalog of all currently registered configs
 - `PUT /api/admin/files/{category}/{filename}` -- write/overwrite a `.py` file in `tables/` or `handlers/`
+- `DELETE /api/admin/files/{category}/{filename}` -- delete a `.py` file from `tables/` or `handlers/`
 - `GET /api/admin/files/{category}` -- list all `.py` files in `tables/` or `handlers/`
 - `GET /api/admin/files/{category}/{filename}` -- read a single `.py` file's content
 - `GET /api/admin/workspace/download` -- download entire workspace (tables + handlers) as a zip archive
 - `GET /api/admin/api-catalog` -- list all callable action and handler APIs with full URLs (auto-adapts to local/Railway)
 - `GET /api/admin/api-catalog/{table}` -- list all APIs for a specific table (actions + queries) with full URLs
+- `POST /api/admin/validate-table` -- validate table config source code against live registry (no side effects)
+- `POST /api/admin/validate-handler` -- validate handler source code against live registry (no side effects)
 
 **Files:**
 
@@ -185,7 +194,8 @@ Thin FastAPI wrappers. Route groups mounted on the app:
 - `api/routes/queries.py` -- query endpoints
 - `api/routes/handlers.py` -- handler endpoints (200 for sync, 202 for async)
 - `api/routes/tasks.py` -- task polling endpoint
-- `api/routes/admin.py` -- admin endpoints (`reload`, `schema-catalog`)
+- `api/routes/admin.py` -- admin endpoints (`reload`, `schema-catalog`, file CRUD, workspace download, API catalog, validation)
+- `api/validators.py` -- validation logic for table config and handler source code
 
 ## Directory Structure
 
@@ -204,11 +214,13 @@ data_platform/
     table/
       __init__.py
       config.py                      # TableConfig, ColumnDef, FKDefinition, PKConfig
+      coerce.py                      # TypeCoercer: pg_type-driven input/output/condition coercion
       state_machine.py               # CAS predicate helpers
       base_functions.py              # 6 internal functions
       table_handle.py                # TableHandle proxy
       tests/
         test_config.py
+        test_coerce.py               # Unit + integration tests for TypeCoercer
         test_state_machine.py
         test_table_handle.py
 
@@ -272,7 +284,8 @@ data_platform/
         queries.py                   # Query endpoints
         handlers.py                  # Handler endpoints (sync 200 / async 202)
         tasks.py                     # Task polling endpoint
-        admin.py                     # Admin endpoints (reload, schema-catalog)
+        admin.py                     # Admin endpoints (reload, schema-catalog, file CRUD, workspace download, API catalog, validation)
+      validators.py                    # Validation logic for table config and handler source
       tests/
         test_api.py
         test_admin_routes.py
@@ -302,15 +315,18 @@ ActionExecutor.execute(params, tx=None)
   │  tx=None -> acquire conn, BEGIN
   ▼
 ActionExecutor._execute_inner
-  │  1. generate PK (uuid4)
-  │  2. inject state="draft" into data
-  │  3. call base_functions.insert(backend, table, prepared_data, tx)
+  │  1. coerce_input(data) -- "1990-05-20" -> date, "true" -> True
+  │  2. generate PK (uuid4)
+  │  3. inject state="draft" into data
+  │  4. call base_functions.insert(backend, table, prepared_data, tx)
   │     └─> sql.build_insert() -> "INSERT INTO ... RETURNING *"
   │         └─> backend.execute_one(conn, sql, params)
-  │  4. on success: COMMIT, release conn
-  │  5. on DB error: translate_db_error() -> ActionError, ROLLBACK
+  │  5. coerce_output(row) -- date -> "1990-05-20", Decimal -> float
+  │  6. on success: COMMIT, release conn
+  │  7. on ValueError: ActionError(INVALID_INPUT), ROLLBACK
+  │  8. on DB error: translate_db_error() -> ActionError, ROLLBACK
   ▼
-{"success": true, "data": {...inserted row...}}
+{"success": true, "data": {...inserted row, JSON-safe...}}
 ```
 
 ### Handler call -- sync (shared transaction)
@@ -410,8 +426,8 @@ flowchart TB
         INFRA_ERROR["INFRA_ERROR (503)"]
     end
 
-    subgraph ActionExec ["Action Executor"]
-        INVALID_INPUT_ACTION["INVALID_INPUT (400)"]
+    subgraph ActionExec ["Action Executor + TypeCoercer"]
+        INVALID_INPUT_ACTION["INVALID_INPUT (400) -- includes type coercion errors"]
         MISSING_PK["MISSING_PK (400)"]
         STATE_MISMATCH["STATE_MISMATCH (409)"]
         PK_CONFLICT["PK_CONFLICT (409)"]
@@ -441,6 +457,7 @@ The following diagrams show which error codes can appear at each layer for the s
 ```mermaid
 flowchart LR
     Call["handle.action()"] --> AE["ActionExecutor"]
+    AE -->|"type coercion failure"| E0a["INVALID_INPUT"]
     AE -->|"malformed params/conditions"| E0["INVALID_INPUT"]
     AE -->|"validate params"| E1["MISSING_PK"]
     AE -->|"PK generation"| E2["PK_CONFLICT"]
@@ -536,14 +553,14 @@ flowchart LR
     Route -->|"table not found"| E1["NOT_FOUND (404)"]
     Route -->|"bad/non-object JSON body"| E2["INVALID_INPUT (400)"]
     Route -->|"unknown method"| E3["NOT_FOUND (404)"]
-    Route --> QE["QueryExecutor"]
-    QE -->|"bad conditions"| E4["INVALID_INPUT (400)"]
+    Route --> QE["QueryExecutor + TypeCoercer"]
+    QE -->|"bad conditions / type coercion failure"| E4["INVALID_INPUT (400)"]
     QE -->|"DB exception"| E5["DB_ERROR (400)"]
 ```
 
 
 
-Query actions are read-only. `ValueError` from condition validation becomes `INVALID_INPUT`; non-object JSON bodies also return `INVALID_INPUT`. Any other DB exception becomes `DB_ERROR`.
+Query actions are read-only. `ValueError` from condition validation or type coercion (e.g., invalid date string in a condition) becomes `INVALID_INPUT`; non-object JSON bodies also return `INVALID_INPUT`. Any other DB exception becomes `DB_ERROR`. Returned rows are auto-coerced to JSON-safe values via `TypeCoercer.coerce_output()`.
 
 #### Path 6: Raw Query (inside handlers)
 
@@ -611,31 +628,37 @@ Raw query errors are not translated through `error_translator` because they are 
 
 ## Implemented Fixes
 
-### c
+### Production Hot Reload + Schema Catalog (formerly issue #5)
 
 Hot reload is now implemented with a three-phase safety pipeline:
 
 1. **Scan phase**: `scan_tables()` and `scan_handlers_safe()` import files one-by-one with isolated `try/except`, so syntax/import errors are collected into `scan_errors` and do not break the running service.
 2. **Diff phase**: existing table configs are checked with append-only rules (`T2`-`T10`). Any unsafe mutation (delete/modify existing definition) returns `409` and cancels the entire reload.
-3. **Execute phase**: new/updated table handles are built in staging dicts, then atomically swapped into live registry maps. If execution fails, in-memory registry state is preserved and best-effort DB cleanup is attempted for newly created tables.
+3. **Execute phase**: new/updated table handles are built in staging dicts, then atomically swapped into live registry maps. File deletions are also reflected (`tables_removed`, `handlers_removed`). If execution fails, in-memory registry state is preserved and best-effort DB cleanup is attempted for newly created tables.
 
 Admin endpoints:
 
 - `POST /api/admin/reload` -- trigger hot reload (scan, diff, execute)
 - `GET /api/admin/schema-catalog` -- read-only snapshot of all registered configs
 - `PUT /api/admin/files/{category}/{filename}` -- write a `.py` file to `tables/` or `handlers/`
+- `DELETE /api/admin/files/{category}/{filename}` -- delete a `.py` file from `tables/` or `handlers/`
 - `GET /api/admin/files/{category}` -- list `.py` files in a category
 - `GET /api/admin/files/{category}/{filename}` -- read a file's content
 - `GET /api/admin/workspace/download` -- download all workspace files as zip
+- `GET /api/admin/api-catalog` -- list all callable action + handler APIs
+- `GET /api/admin/api-catalog/{table}` -- list action + query APIs for one table
+- `POST /api/admin/validate-table` -- validate table config source against live registry
+- `POST /api/admin/validate-handler` -- validate handler source against live registry
 
-The file management endpoints enable external systems (e.g., CrewAI) to push new table configs and handler definitions at runtime via HTTP, then trigger hot reload -- without restarting the service or requiring filesystem access.
+The file management endpoints enable external systems (e.g., CrewAI) to push new table configs and handler definitions at runtime via HTTP, then trigger hot reload -- without restarting the service or requiring filesystem access. The validation endpoints allow pre-flight checks before writing, providing deterministic, registry-aware diagnostics with machine-readable error codes.
 
 Key implementation files:
 
 - `lib/reload/scanner.py`
 - `lib/reload/diff.py`
 - `lib/registry.py` (`ReloadResult`, `_build_handle()`, `reload()`, `schema_catalog()`)
-- `lib/api/routes/admin.py` (reload, schema-catalog, file management, workspace download)
+- `lib/api/routes/admin.py` (reload, schema-catalog, file management, workspace download, validation)
+- `lib/api/validators.py` (table config and handler source validation logic)
 - `workspace/crm_demo/app.py` (mounts admin routes, startup volume scan)
 
 Automated coverage for this feature:
@@ -711,15 +734,19 @@ If `_make_json_safe()` raises `TypeError` (e.g., handler returns an object that 
 **Types handled by `_make_json_safe()`:**
 
 
-| Python type                                           | Conversion            |
-| ----------------------------------------------------- | --------------------- |
-| `datetime.date`, `datetime.datetime`, `datetime.time` | `.isoformat()`        |
-| `uuid.UUID`                                           | `str()`               |
-| `decimal.Decimal`                                     | `float()`             |
-| `dict`, `list`, `tuple`                               | Recursively converted |
+| Python type            | Conversion                                      |
+| ---------------------- | ----------------------------------------------- |
+| `datetime.datetime`    | `.isoformat(sep=" ")` (space separator, Navicat-style) |
+| `datetime.date`        | `.isoformat()` (`"2025-01-15"`)                 |
+| `datetime.time`        | `.isoformat()` (`"10:30:00"`)                   |
+| `datetime.timedelta`   | `str()` (`"1:30:00"`)                           |
+| `uuid.UUID`            | `str()`                                         |
+| `decimal.Decimal`      | `float()`                                       |
+| `dict`, `list`, `tuple`| Recursively converted                           |
 
+The HTTP response serializer (`_DBEncoder` in `api/routes/__init__.py`) handles the same types with consistent formatting. Both layers use space-separated ISO for `datetime` to match Navicat/psql display style.
 
-Handler authors no longer need manual `_serialize()` helpers for return values.
+Handler authors no longer need manual `_serialize()` helpers for return values. In most cases, `TypeCoercer` at the executor level already converts action/query results to JSON-safe types before they reach the handler. `_make_json_safe` serves as a fallback safety net for handler custom return values that include non-DB types (e.g., `uuid.UUID` constructed in handler logic).
 
 ### Table-Level CHECK Constraints (formerly issue #3)
 
@@ -877,7 +904,91 @@ Key PG parameters to tune: `max_wal_size` (prevent frequent checkpoints), `state
 
 Full analysis with specific parameter values, examples, and the multi-transaction handler design discussion: `[keyi_log/2026-03-28-concurrency-pressure-and-pg-tuning.md](../../keyi_log/2026-03-28-concurrency-pressure-and-pg-tuning.md)`
 
-### 3. Redis / Kafka / Flink — Future Infrastructure Components
+### 3. Runtime Schema Drift and Hot Reload Edge Cases
+
+The system validates DB schema against config **only at startup** (`register_table` calls `schema_validator.validate_schema`). After the process is running, there is no continuous reconciliation. Combined with hot reload's own edge cases, this creates several risk categories.
+
+#### 3.1 PostgreSQL External DDL — Schema Drift at Runtime
+
+If an external actor (DBA, migration script, another service) modifies the DB schema while the platform is running, the Registry has no way to detect or recover.
+
+| External operation | Runtime impact | Severity |
+|--------------------|---------------|----------|
+| `DROP TABLE` / `ALTER TABLE RENAME` | All operations on that table return 500 (`UndefinedTableError`). Registry still holds stale config. Cannot self-heal; requires restart. | Critical |
+| `ALTER TABLE DROP COLUMN` | Any action/query referencing the dropped column returns 500 (`UndefinedColumnError`). | Critical |
+| `ALTER TABLE ADD COLUMN` (NOT NULL, no DEFAULT) | All INSERTs fail immediately (`NotNullViolationError`) because the platform does not populate the new column. | High |
+| `ALTER TABLE ADD COLUMN` (nullable or has DEFAULT) | Silent. Extra column appears in `RETURNING *` results but is otherwise harmless. Becomes a problem only at next restart if `schema_validator` detects the mismatch. | Low |
+| `ALTER TABLE ALTER TYPE` (incompatible) | Type coercion failures surface as `DB_ERROR` 400 via `error_translator`. Error message does not indicate schema drift. | Medium |
+| `ALTER TABLE ADD/DROP CONSTRAINT` | Adding: unexpected 422 errors on writes. Dropping: weaker guarantees than config promises. Both detected only at next restart. | Medium |
+
+**Current gap:** No runtime schema health check. The `schema_validator` is startup-only. A periodic or on-demand reconciliation endpoint (`GET /api/admin/schema-health`) that re-runs `validate_schema` against live DB would surface drift without requiring a restart.
+
+#### 3.2 PostgreSQL External DML — Data Integrity Bypass
+
+Direct SQL against the database bypasses the state machine and PK generation pipeline.
+
+| External operation | Runtime impact | Severity |
+|--------------------|---------------|----------|
+| `UPDATE ... SET state = 'invalid_value'` | Row enters a state not in the config's `states` list. Subsequent CAS conditions (`WHERE state = 'expected'`) never match -> `STATE_MISMATCH` 409. The row becomes unreachable by the state machine. | High |
+| `DELETE FROM table WHERE ...` | Affected rows disappear. Updates/deletes return `STATE_MISMATCH` (message says "state differs" rather than "row deleted"). `get_by_pk` returns null. No way to distinguish "externally deleted" from "state mismatch". | Medium |
+| `INSERT INTO table ...` (bypassing PK generator) | If PK collides: subsequent platform INSERTs get `UNIQUE_VIOLATION` (handled). If state is set to a value not in config transitions: row is unreachable. | Medium |
+| `TRUNCATE table` | All queries return empty. All updates/deletes return `STATE_MISMATCH`. Indistinguishable from a legitimately empty table. | Medium |
+
+**Current gap:** The CAS (Compare-And-Swap) pattern on `state` is the only runtime guard. It prevents transitions from wrong states but cannot restore corrupted rows. A state audit query endpoint could detect rows in invalid states.
+
+#### 3.3 Connection and Infrastructure Failures
+
+| Scenario | Runtime impact | Current handling |
+|----------|---------------|-----------------|
+| Database restart / failover | Stale connections in asyncpg pool raise `ConnectionDoesNotExistError` or `InterfaceError`. Requests fail until stale connections are evicted and replaced. | None. asyncpg pool does not have built-in health checks. Connection errors surface as `INFRA_ERROR` 503 through handler error taxonomy, or raw 500 through action routes. |
+| Long-running external transaction holds lock | Platform requests block on `acquire()` or on SQL execution waiting for lock release. Manifests as request timeout. | No statement timeout configured by default. No lock-wait timeout. |
+| `pg_terminate_backend()` kills connection | Mid-transaction operations fail with `ConnectionDoesNotExistError`. If inside a handler, the entire handler rolls back (correct). If inside a standalone action, the action rolls back (correct). | Rollback behavior is correct, but error message to client is generic `DB_ERROR` rather than a retry-friendly `INFRA_ERROR`. |
+
+#### 3.4 Hot Reload Concurrent Execution (Documented Risk, Not Yet Fixed)
+
+Detailed in section 2.2 above ("Concurrent Reload Guard"). Key race conditions when two `POST /api/admin/reload` requests overlap:
+
+1. **Duplicate CREATE TABLE:** Both requests scan the same new file, both execute `CREATE TABLE IF NOT EXISTS`. Second CREATE is a no-op, but both build separate `TableHandle` objects. The final registry state depends on dict write ordering.
+2. **Phantom file:** Request A scans file `x.py`, request B deletes `x.py` from disk during A's diff phase. A proceeds to CREATE TABLE for a config whose source file no longer exists.
+3. **Partial swap interleaving:** The atomic swap loop (`for name, config in staged_configs.items(): self._table_configs[name] = config`) from two concurrent reloads can interleave, producing a registry that reflects neither reload's intended final state.
+
+#### 3.5 Hot Reload Rollback Gaps
+
+The reload rollback in `Registry.reload()` is best-effort:
+
+```python
+for tbl in created_table_names:
+    try:
+        await self._backend.execute(conn, f"DROP TABLE IF EXISTS {tbl}", [])
+    except Exception:
+        logger.warning("Rollback DROP TABLE %s failed", tbl, exc_info=True)
+```
+
+| Gap | Impact |
+|-----|--------|
+| Concurrent data insertion during rollback | If a request writes to a newly-created table between CREATE and rollback DROP, that data is silently lost. | 
+| Rollback DROP fails (DB connection lost) | Table persists in DB but not in Registry. Next startup's `scan_tables` discovers it and tries to register it, which may succeed or fail depending on schema_validator. |
+| Handler rollback is not attempted | Handlers registered during Phase 3c are not unregistered on failure. If table creation fails after handler registration, the handler references tables that don't exist. |
+
+#### 3.6 File System vs Registry Consistency
+
+| Scenario | Impact |
+|----------|--------|
+| File written via `PUT /api/admin/files` but reload not triggered | Disk has config that Registry doesn't know about. Silent until next restart or reload. |
+| File modified to violate append-only rules, reload correctly rejects | Disk now has an incompatible config. Next **restart** will attempt `register_table` with the incompatible config. If the table already exists in DB, `schema_validator` may raise `SchemaConflictError` and **crash the startup**. |
+| Handler file modified on disk | Reload skips already-registered handlers. File change has no effect until full restart. This is by design but causes "I changed the code, why didn't it work?" confusion. |
+
+#### 3.7 Module Import Side Effects During Scan
+
+`scan_tables` and `scan_handlers_safe` use `importlib.util` to dynamically execute `.py` files. Each scan:
+
+- Executes all top-level code in the file (imports, global variable assignments, function definitions)
+- Cleans up `sys.modules[module_name]` after scan, but does not undo side effects (global state mutations, signal handlers, spawned threads)
+- If a table config file imports a third-party library that initializes state on import (e.g., logging config, DB connections), that initialization runs on every reload scan
+
+This is currently safe for the CRM demo workspace because config files only contain Pydantic model construction, but it is not enforced or sandboxed.
+
+### 4. Redis / Kafka / Flink -- Future Infrastructure Components
 
 The current system uses PostgreSQL as the sole data store with no caching, message queue, or stream processing layer. This is sufficient for the current CRM scale but has known gaps: `TaskStore` is in-memory and lost on restart (`lib/handler/task_store.py`), lookup tables are re-queried from PG on every request, and there is no event notification to downstream systems.
 

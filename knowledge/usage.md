@@ -125,6 +125,13 @@ config = TableConfig(
         ),
     ],
 
+    # -- Table-level CHECK constraints (optional) --
+    # Use this for multi-column invariants that cannot be expressed
+    # as a single ColumnDef.check.
+    table_constraints=[
+        "amount >= 0 OR note IS NOT NULL",
+    ],
+
     # -- Actions: bind base functions to state transitions --
     actions=[
         ActionDef(name="create_order",    function_type="insert",      transition=StateTransition(from_state="init",     to_state="draft")),
@@ -148,6 +155,8 @@ config = TableConfig(
 
 **`fk_definitions`**: Foreign key constraints. These are included in the DDL, enforced by the database, and validated during schema comparison.
 
+**`table_constraints`**: Table-level CHECK constraints for multi-column rules (for example, `start_date <= end_date`). These are emitted as `CHECK (...)` in DDL and validated by schema comparison.
+
 **`actions`**: The list of actions (see Section 4).
 
 ### ColumnDef options reference
@@ -161,6 +170,22 @@ config = TableConfig(
 | `identity`     | `"always" \| "by_default" \| None`| `None`   | GENERATED AS IDENTITY (for auto-increment integer PKs) |
 | `unique`       | `bool`                            | `False`  | UNIQUE constraint                                      |
 | `check`        | `str \| None`                     | `None`   | CHECK constraint expression (e.g., `"amount >= 0"`)    |
+
+### Table-level CHECK constraints
+
+`TableConfig.table_constraints` is a list of SQL expressions, each emitted as `CHECK (expr)` at table level:
+
+```python
+config = TableConfig(
+    ...,
+    table_constraints=[
+        "issue_size IS NULL OR circulation_size IS NULL OR (circulation_size BETWEEN 0 AND issue_size)",
+        "maturity IS NULL OR listing_date IS NULL OR listing_date <= maturity",
+    ],
+)
+```
+
+Use column-level `ColumnDef.check` for single-column rules, and `table_constraints` for cross-column invariants.
 
 ---
 
@@ -286,6 +311,26 @@ actions=[
 
 Actions are the write path. Each `function_type` has a specific input/output contract. All actions can be called as Python functions or via HTTP.
 
+### Auto Type Coercion
+
+All action inputs and outputs are automatically coerced based on `ColumnDef.pg_type`. You can pass JSON-native values (strings, numbers) and they will be converted to the correct Python types for asyncpg. Returned rows are automatically converted to JSON-safe values.
+
+**Input examples (what you can pass):**
+- Date column (`pg_type="date"`): pass `"1990-05-20"` (ISO string) -- auto-converted to Python `date`
+- Boolean column (`pg_type="boolean"`): pass `"true"`, `"false"`, `1`, `0` -- auto-converted to Python `bool`
+- Integer column (`pg_type="integer"`): pass `"42"` (string) or `42` (number) -- both work
+- Timestamp column (`pg_type="timestamptz"`): pass `"2025-01-15T10:30:00"` or `"2025-01-15 10:30:00"` -- auto-converted to Python `datetime`
+
+**Output format:**
+- `date` -> `"2025-01-15"` (ISO 8601)
+- `timestamp` / `timestamptz` -> `"2025-01-15 10:30:00"` (space separator, matches Navicat/psql display)
+- `numeric` / `Decimal` -> `99.99` (JSON number)
+- `text`, `boolean`, `integer`, `float` -> unchanged (already JSON-safe)
+
+If a value cannot be coerced (e.g., `"abc"` for a date column), the action returns `INVALID_INPUT` (HTTP 400) with a descriptive error message. No data is committed.
+
+Handler authors who already pass Python `date`/`datetime` objects can continue doing so -- coercion is idempotent.
+
 ### 5.1 `insert`
 
 Creates one new row.
@@ -319,9 +364,9 @@ result = await orders.create_order(
     "data": {                         # the full inserted row from RETURNING *
         "id": "a1b2c3d4-...",        # auto-generated PK
         "customer_id": "cust-001",
-        "amount": 99.99,
+        "amount": 99.99,             # numeric -> float (auto-coerced)
         "note": "first order",
-        "created_at": "2026-03-26T10:00:00+00:00",
+        "created_at": "2026-03-26 10:00:00+00:00",  # timestamp uses space separator
         "state": "draft",            # auto-injected from transition's to_state
     }
 }
@@ -335,11 +380,13 @@ Content-Type: application/json
 {
     "data": {
         "customer_id": "cust-001",
-        "amount": 99.99,
+        "amount": "99.99",
         "note": "first order"
     }
 }
 ```
+
+Note: `"amount": "99.99"` (string) is auto-coerced to `Decimal("99.99")` for `numeric(12,2)`. You can also pass `99.99` (number) directly.
 
 **HTTP response (success):**
 ```json
@@ -350,7 +397,7 @@ Content-Type: application/json
         "customer_id": "cust-001",
         "amount": 99.99,
         "note": "first order",
-        "created_at": "2026-03-26T10:00:00+00:00",
+        "created_at": "2026-03-26 10:00:00+00:00",
         "state": "draft"
     }
 }
@@ -388,7 +435,7 @@ result = await orders.submit_order(
         "customer_id": "cust-001",
         "amount": 99.99,
         "note": "rush delivery",      # updated
-        "created_at": "2026-03-26T10:00:00+00:00",
+        "created_at": "2026-03-26 10:00:00+00:00",
         "state": "pending",           # changed from "draft" to "pending" by transition
     }
 }
@@ -416,7 +463,7 @@ Content-Type: application/json
         "customer_id": "cust-001",
         "amount": 99.99,
         "note": "rush delivery",
-        "created_at": "2026-03-26T10:00:00+00:00",
+        "created_at": "2026-03-26 10:00:00+00:00",
         "state": "pending"
     }
 }
@@ -448,7 +495,7 @@ result = await orders.remove_order(pk="a1b2c3d4-...")
         "customer_id": "cust-001",
         "amount": 99.99,
         "note": "rush delivery",
-        "created_at": "2026-03-26T10:00:00+00:00",
+        "created_at": "2026-03-26 10:00:00+00:00",
         "state": "inactive",         # the state the row was in before deletion
     }
 }
@@ -601,6 +648,8 @@ result = await orders.bulk_remove(
 ## 6. Query Methods: Input, Output, and HTTP
 
 Queries are the read path. Every registered table gets 4 built-in query methods automatically. No `ActionDef` needed.
+
+**Type coercion also applies to queries:** condition values are auto-coerced (e.g., `("date_of_birth", ">", "1990-01-01")` -- the string is converted to a `date` object), and returned rows are auto-coerced to JSON-safe values (e.g., `date` -> ISO string, `Decimal` -> float, `datetime` -> space-separated ISO).
 
 ### 6.1 `get_by_pk`
 
@@ -868,6 +917,8 @@ async def handle(ctx, payload):
 
 ## 7. Writing a Handler
 
+> **Comprehensive reference:** See [handler_guide.md](handler_guide.md) for the full handler development guide, including transaction model, step tracking, error propagation flow, validation endpoint details, and best practices.
+
 ### Basic handler structure (sync)
 
 Create a `.py` file in the `handlers/` directory. The file name becomes the handler name and URL.
@@ -1134,6 +1185,7 @@ async def handle(ctx, payload: dict):
 8. **All actions share one transaction.** If any fails, everything rolls back.
 9. **Files starting with `_` are skipped** during auto-scan.
 10. **Step tracking is automatic.** All action calls through `ctx` are tracked. On failure, the error response includes which step failed and which prior steps were rolled back.
+11. **No manual type conversion needed.** The platform auto-coerces date strings, boolean strings, numeric strings, etc. based on `ColumnDef.pg_type`. You can pass `"1990-05-20"` directly in `data` and the `date` column will receive a Python `date` object. If your handler already converts types manually (e.g., `date.fromisoformat()`), it still works -- coercion is idempotent.
 
 ---
 
@@ -1168,7 +1220,7 @@ Handler errors use `"detail"` (singular) instead of `"details"` -- this is inten
 
 | Code               | Source            | Meaning                                                  | HTTP Status | Layer                    |
 | ------------------ | ----------------- | -------------------------------------------------------- | ----------- | ------------------------ |
-| `INVALID_INPUT`    | Input validation  | Malformed conditions, bad JSON, structural input errors  | 400         | HTTP route, action executor, SQL builder |
+| `INVALID_INPUT`    | Input validation / type coercion  | Malformed conditions, bad JSON, structural input errors, type coercion failures (e.g., `"abc"` for a `date` column)  | 400         | HTTP route, action executor, query executor, TypeCoercer |
 | `FIELD_REQUIRED`   | DB NOT NULL       | A non-nullable field was null or missing                 | 422         | Error translator         |
 | `FK_VIOLATION`     | DB FK constraint  | Referenced row doesn't exist in target table             | 422         | Error translator         |
 | `FK_RESTRICT`      | DB FK constraint  | Cannot delete: other rows reference this row             | 409         | Error translator         |
@@ -1196,7 +1248,7 @@ The following tables show which error codes you can encounter in each execution 
 
 | Error Code         | Layer              | Trigger                                       |
 | ------------------ | ------------------ | --------------------------------------------- |
-| `INVALID_INPUT`    | Action executor    | Malformed params/conditions (e.g. bad operator) |
+| `INVALID_INPUT`    | Action executor / TypeCoercer | Malformed params/conditions (e.g. bad operator), type coercion failures (e.g. invalid date string) |
 | `MISSING_PK`       | Action executor    | `pk` not provided for update/delete           |
 | `STATE_MISMATCH`   | Action executor    | Row not in expected `from_state`              |
 | `PK_CONFLICT`      | Action executor    | PK generation exhausted retries               |
@@ -1219,7 +1271,7 @@ All errors are raised as `ActionError`.
 | Error Code         | Layer              | Trigger                                       |
 | ------------------ | ------------------ | --------------------------------------------- |
 | `NOT_FOUND`        | HTTP route         | Table or action not registered                |
-| `INVALID_INPUT`    | HTTP route / action executor | Bad JSON body, non-object JSON body, or malformed params/conditions |
+| `INVALID_INPUT`    | HTTP route / action executor / TypeCoercer | Bad JSON body, non-object JSON body, malformed params/conditions, or type coercion failures |
 | *(all from Path 1)*| Action executor    | *(same triggers as standalone)*               |
 
 The HTTP route validates JSON/body structure, catches `ActionError`, and maps `error.code` to an HTTP status via `HTTP_STATUS`. Malformed action params/conditions are raised from the action path as `ActionError(code=INVALID_INPUT)`.
@@ -1241,6 +1293,8 @@ The HTTP route validates JSON/body structure, catches `ActionError`, and maps `e
 When `ACTION_FAILED` is returned, inspect `detail.failed_action` for the original error code (e.g., `FK_VIOLATION`) and `detail.completed_actions` for rolled-back steps.
 
 Handler results are automatically serialized to JSON-safe types before the transaction is committed. Types like `datetime.date`, `uuid.UUID`, and `decimal.Decimal` returned by asyncpg are converted automatically -- handler authors do not need to write manual serialization helpers.
+
+Type coercion errors (e.g., passing `"bad-date"` to a `date` column) inside a handler are surfaced as `ACTION_FAILED` with the original `INVALID_INPUT` error code in `detail.failed_action.error_code`. The entire handler transaction is rolled back, and all completed steps are marked as `rolled_back`.
 
 #### Path 4: Handler -- Async
 
@@ -1265,7 +1319,7 @@ The HTTP response is always `202 Accepted` with a `task_id`. Errors appear in th
 | Error Code         | Layer              | Trigger                                       |
 | ------------------ | ------------------ | --------------------------------------------- |
 | `NOT_FOUND`        | HTTP route         | Table or query method not found               |
-| `INVALID_INPUT`    | HTTP route         | Bad JSON body, non-object JSON body, or bad conditions (ValueError) |
+| `INVALID_INPUT`    | HTTP route / TypeCoercer | Bad JSON body, non-object JSON body, bad conditions (ValueError), or type coercion failures in condition values |
 | `DB_ERROR`         | HTTP route         | Unexpected DB exception during query          |
 
 Query actions are read-only. DB constraint errors are not expected, but any exception is caught and returned as `DB_ERROR` rather than an unhandled 500.
@@ -1287,7 +1341,7 @@ Raw query errors are **not** translated through `error_translator` because they 
 The `code` field tells you the category:
 - `FIELD_REQUIRED`, `FK_VIOLATION`, `CHECK_VIOLATION` (HTTP 422) -- the data you sent is **semantically invalid**. The database rejected it.
 - `STATE_MISMATCH`, `UNIQUE_VIOLATION`, `FK_RESTRICT`, `PK_CONFLICT` (HTTP 409) -- there is a **conflict** with existing state. The row is in the wrong state, or the value already exists.
-- `MISSING_PK`, `DB_ERROR`, `INVALID_INPUT` (HTTP 400) -- the request is **malformed** or triggered an unrecognized database error.
+- `MISSING_PK`, `DB_ERROR`, `INVALID_INPUT` (HTTP 400) -- the request is **malformed**, a value could not be coerced to the column's type (e.g., invalid date string), or triggered an unrecognized database error.
 - `HANDLER_ERROR` -- the handler author raised this error intentionally. Read `message` and `detail`.
 - `ACTION_FAILED` (HTTP 409) -- an action failed inside a handler. Check `detail.failed_action` for which table/action/step failed and the original `error_code`.
 - `NOT_FOUND` (HTTP 404) -- the table, action, handler, query method, or task ID does not exist.
@@ -1411,7 +1465,27 @@ Response (the table has `CHECK (amount >= 0)`):
 ```
 **Fix:** Amount must be >= 0.
 
-**Example 5: Unique violation (HTTP 409)**
+**Example 5: Type coercion failure (HTTP 400)**
+
+Request:
+```json
+POST /api/actions/party_person/create_party_person_draft
+{"data": {"party_id": "abc-123", "date_of_birth": "not-a-date", "first_name": "Test"}}
+```
+Response:
+```json
+{
+    "success": false,
+    "error": {
+        "code": "INVALID_INPUT",
+        "message": "Cannot coerce 'not-a-date' to date for column 'date_of_birth'",
+        "details": {"reason": "Cannot coerce 'not-a-date' to date for column 'date_of_birth'"}
+    }
+}
+```
+**Fix:** Use a valid ISO 8601 date string like `"1990-05-20"`, or pass a Python `date` object from handler code.
+
+**Example 6: Unique violation (HTTP 409)**
 
 Request:
 ```json
@@ -1431,7 +1505,7 @@ Response (email has a UNIQUE constraint and alice@example.com already exists):
 ```
 **Fix:** Use a different email, or update the existing user instead.
 
-**Example 6: Handler error -- uncaught action failure with step tracking (HTTP 409)**
+**Example 7: Handler error -- uncaught action failure with step tracking (HTTP 409)**
 
 Request:
 ```json
@@ -1463,7 +1537,7 @@ Response (inventory deduction failed at step 3):
 ```
 **Diagnosis:** The inventory item for prod-X is not in "in_stock" state. Steps 1 and 2 (order creation and line items) were rolled back.
 
-**Example 7: Handler error -- custom, caught by handler author**
+**Example 8: Handler error -- custom, caught by handler author**
 
 Request:
 ```json
@@ -1696,7 +1770,7 @@ curl -X POST http://localhost:8000/api/actions/orders/create_order \
   -d '{"data": {"customer_id": "cust-001", "amount": 99.99}}'
 
 # Response (HTTP 200):
-# {"success": true, "data": {"id": "abc-123", "customer_id": "cust-001", "amount": 99.99, "state": "draft", ...}}
+# {"success": true, "data": {"id": "abc-123", "customer_id": "cust-001", "amount": 99.99, "state": "draft", "created_at": "2026-03-26 10:00:00+00:00", ...}}
 ```
 
 **Submit the order (change state draft -> pending):**
@@ -1786,9 +1860,14 @@ These endpoints are intended for controlled runtime operations in production-lik
 - `POST /api/admin/reload` -- trigger hot reload
 - `GET /api/admin/schema-catalog` -- read-only schema snapshot
 - `PUT /api/admin/files/{category}/{filename}` -- write a `.py` file
+- `DELETE /api/admin/files/{category}/{filename}` -- delete a `.py` file
 - `GET /api/admin/files/{category}` -- list `.py` files
 - `GET /api/admin/files/{category}/{filename}` -- read a `.py` file's content
 - `GET /api/admin/workspace/download` -- download workspace as zip
+- `POST /api/admin/validate-table` -- validate table config source code against live registry
+- `POST /api/admin/validate-handler` -- validate handler source code against live registry
+- `GET /api/admin/api-catalog` -- list all action + handler APIs with full URLs
+- `GET /api/admin/api-catalog/{table_name}` -- list all action + query APIs for one table
 
 ### Mounting admin routes
 
@@ -1821,11 +1900,13 @@ mount_admin_routes(app.router, registry, tables_dir, handlers_dir)
 
 ### Optional admin token
 
-If `ADMIN_TOKEN` is set in environment variables, all admin endpoints require:
+If `ADMIN_TOKEN` is set in environment variables, endpoints that mutate/validate runtime state require:
 
 ```
 Authorization: Bearer <ADMIN_TOKEN>
 ```
+
+These endpoints are currently readable without `ADMIN_TOKEN`: `GET /api/admin/schema-catalog`, `GET /api/admin/api-catalog`, `GET /api/admin/api-catalog/{table_name}`.
 
 ### Reload behavior guarantees
 
@@ -1844,11 +1925,13 @@ Typical success response:
     "added": ["new_table"],
     "updated": [],
     "unchanged": ["orders", "items"],
+    "removed": [],
     "details": {}
   },
   "handlers": {
     "added": ["new_handler"],
-    "skipped": ["existing_handler"]
+    "skipped": ["existing_handler"],
+    "removed": []
   }
 }
 ```
@@ -1886,6 +1969,7 @@ Typical rejection response (`409`):
       "transitions": [...],
       "columns": [...],
       "fk_definitions": [...],
+      "table_constraints": [...],
       "actions": [...]
     }
   },
@@ -1999,13 +2083,134 @@ curl -X POST http://localhost:8000/api/actions/inventory/create_item \
   -d '{"data": {"product": "Widget-A", "qty": 100}}'
 ```
 
-#### No DELETE endpoint
+#### Delete a file
 
-The hot reload system is append-only by design (`diff.py` rules T4-T10). States, transitions, and actions can only be added, never removed. Exposing a file deletion endpoint would contradict this architecture. If a reload fails, the internal rollback in `Registry.reload()` handles cleanup automatically by dropping newly-created tables.
+```
+DELETE /api/admin/files/{category}/{filename}
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+This removes the file from disk. After that, call `POST /api/admin/reload`:
+
+- If it was a table file, the table is removed from in-memory registry (`tables.removed`) and its APIs stop being callable.
+- If it was a handler file, the handler is removed from in-memory registry (`handlers.removed`).
+- The PostgreSQL table is not dropped automatically by file deletion.
+
+This does not weaken append-only safety for updates: existing table definitions are still checked by rules `T2`-`T10`.
+
+### Validation endpoints
+
+These endpoints enable external systems (e.g., CrewAI) to validate table configs and handler source code **before** writing files and triggering hot reload. Validation runs against the live registry without any side effects -- no files are written, no tables are created, no handlers are registered.
+
+#### Validate a table config
+
+```
+POST /api/admin/validate-table
+Content-Type: application/json
+Authorization: Bearer <ADMIN_TOKEN>
+
+{"content": "from lib import TableConfig, ColumnDef, ...\n\nconfig = TableConfig(...)"}
+```
+
+The endpoint parses the Python source, extracts the `config: TableConfig` variable, then runs registry-aware checks:
+
+- **PARSE_ERROR** -- source has syntax errors, import errors, or missing/invalid `config` variable
+- **DUPLICATE_TABLE** -- `table_name` already exists in the live registry
+- **INVALID_FK_TABLE** -- `FKDefinition.referenced_table` not registered
+- **INVALID_FK_FIELD** -- `FKDefinition.referenced_field` not found on the referenced table
+- **MISSING_PK_COLUMN** -- `pk_field` not found in `columns`
+- **PK_COLUMN_NOT_NULL_REQUIRED** -- PK column must set `nullable=False`
+- **PK_COLUMN_REDUNDANT_UNIQUE** -- PK column should not also set `unique=True`
+- **MISSING_STATE_COLUMN** -- required `state` column not in `columns`
+
+Pydantic model validation (identifier checks, transition consistency, action binding rules) is enforced automatically during `TableConfig` construction and surfaces as `PARSE_ERROR`.
+
+Response (valid):
+
+```json
+{"valid": true, "errors": [], "warnings": []}
+```
+
+Response (invalid):
+
+```json
+{
+  "valid": false,
+  "errors": [
+    {
+      "code": "INVALID_FK_TABLE",
+      "message": "Referenced table 'nonexistent' is not registered",
+      "path": "fk_definitions[0].referenced_table",
+      "suggestion": "Check available tables via GET /api/admin/schema-catalog"
+    }
+  ],
+  "warnings": []
+}
+```
+
+#### Validate a handler
+
+```
+POST /api/admin/validate-handler
+Content-Type: application/json
+Authorization: Bearer <ADMIN_TOKEN>
+
+{"content": "async def handle(ctx, payload):\n    ..."}
+```
+
+The endpoint parses the Python source and checks:
+
+- **PARSE_ERROR** -- source has syntax errors or import errors
+- **MISSING_HANDLE** -- no callable `handle` function found
+- **HANDLE_NOT_ASYNC** -- `handle` must be defined with `async def` (the executor uses `await`)
+- **INVALID_HANDLE_SIGNATURE** -- `handle` must accept at least 2 parameters (`ctx`, `payload`)
+- **INVALID_MODE** -- `MODE` variable (if present) must be `"sync"` or `"async"`
+- **UNKNOWN_TABLE_REF** (warning) -- `ctx.<table_name>` references a table not in the live registry
+- **UNKNOWN_ACTION_REF** (warning) -- `ctx.<table>.<action>()` references an action not registered on that table
+
+See [handler_guide.md](handler_guide.md#11-validation-endpoint) for detailed validation examples and response formats.
+
+Response (valid with warning):
+
+```json
+{
+  "valid": true,
+  "errors": [],
+  "warnings": [
+    {
+      "code": "UNKNOWN_TABLE_REF",
+      "message": "ctx.inventory references table 'inventory' which is not currently registered",
+      "path": "ctx.inventory",
+      "suggestion": "Check available tables via GET /api/admin/schema-catalog"
+    }
+  ]
+}
+```
+
+#### Typical workflow: validate before writing
+
+```bash
+# 1. Validate the table config first
+curl -X POST $DATA_PLATFORM_URL/api/admin/validate-table \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "from lib import TableConfig, ..."}'
+
+# 2. If valid, write the file
+curl -X PUT $DATA_PLATFORM_URL/api/admin/files/tables/inventory.py \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "from lib import TableConfig, ..."}'
+
+# 3. Trigger hot reload
+curl -X POST $DATA_PLATFORM_URL/api/admin/reload \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
 
 ### API catalog endpoints
 
 These endpoints let external systems (e.g., CrewAI) discover all callable APIs at runtime. URLs auto-adapt based on the incoming request: `http://localhost:8000` locally, `https://your-domain.up.railway.app` on Railway. After a hot reload adds new tables or handlers, the catalog immediately reflects them.
+These two catalog endpoints are read-only and currently do not enforce `ADMIN_TOKEN`.
 
 #### List all action and handler APIs
 

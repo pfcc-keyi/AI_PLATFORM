@@ -68,6 +68,8 @@ class CodeGenCrew:
                 "- Always include: from lib import ... at the top\n"
                 "- The state column MUST be named exactly 'state': ColumnDef(name='state', pg_type='TEXT', nullable=False)\n"
                 "  If the design has a column like '{table}_state', rename it to 'state'. There must be exactly ONE state column.\n"
+                "- Emit table_constraints exactly from the design when present.\n"
+                "- Use ColumnDef.check for single-column constraints; use table_constraints for cross-column rules.\n"
                 "- FKDefinition on_delete/on_update MUST use PostgreSQL keywords WITH SPACES:\n"
                 "  'NO ACTION' (correct), 'CASCADE', 'RESTRICT', 'SET NULL', 'SET DEFAULT'\n"
                 "  NEVER use underscores: 'NO_ACTION' is WRONG.\n"
@@ -107,6 +109,7 @@ class CodeGenCrew:
                 "6. Include PKConfig with strategy and generator lambda\n"
                 "7. FKDefinition on_delete/on_update: use PostgreSQL keywords WITH SPACES — "
                 "'NO ACTION' (not 'NO_ACTION'), 'CASCADE', 'SET NULL', etc.\n"
+                "8. If design.table_constraints is non-empty, emit table_constraints=[...] exactly as provided.\n"
             ),
             expected_output="Raw Python source code only, no markdown fences",
             agent=generator,

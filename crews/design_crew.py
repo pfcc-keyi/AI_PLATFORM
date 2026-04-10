@@ -36,6 +36,9 @@ class DesignCrew:
                 "- PK strategy is 'custom' with a generator lambda\n"
                 "- Actions bind function_type (insert/update/delete/bulk_*) to transitions\n"
                 "- FK references must point to real, existing tables\n"
+                "- Use ColumnDef.check for single-column constraints\n"
+                "- Use table_constraints for cross-column invariants (e.g. start_date <= end_date)\n"
+                "- For nullable columns in cross-column rules, prefer IS NULL OR ... patterns\n"
                 "- Lookup tables: states=['active','disabled'], include bulk_insert\n"
                 "- Business tables: may include draft/active/disabled states\n"
                 "- PK fields already imply NOT NULL + UNIQUE; never add these as constraints on a PK column\n"
@@ -77,7 +80,7 @@ class DesignCrew:
                 "- columns list (name, pg_type, nullable; MUST include 'state' column)\n"
                 "- actions list (name, function_type, transition)\n"
                 "- fk_definitions (if FK references exist)\n"
-                "- table_constraints (if needed; do NOT add NOT NULL or UNIQUE constraints on PK fields -- PK already enforces both)\n"
+                "- table_constraints (only for cross-column constraints; do NOT add NOT NULL or UNIQUE constraints on PK fields -- PK already enforces both)\n"
             ),
             expected_output="A complete SchemaDesign with all fields.",
             agent=designer,

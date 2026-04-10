@@ -26,6 +26,7 @@
 - [22. Transaction Model](#22-transaction-model)
 - [23. Schema Validation](#23-schema-validation)
 - [24. Hot Reload and Schema Catalog](#24-hot-reload-and-schema-catalog)
+- [25. Auto Type Coercion](#25-auto-type-coercion)
 
 ---
 
@@ -44,6 +45,7 @@ TableConfig(
     transitions=[...],           # allowed state transitions
     columns=[...],               # full DDL column definitions
     fk_definitions=[...],        # foreign key constraints
+    table_constraints=[...],     # table-level CHECK constraints (multi-column invariants)
     actions=[...],               # action bindings (ActionDef list)
 )
 ```
@@ -74,7 +76,7 @@ ColumnDef(
 ```
 
 Key points:
-- `pg_type` is the raw PostgreSQL type string. You write exactly what you want in DDL.
+- `pg_type` is the raw PostgreSQL type string. You write exactly what you want in DDL. It also serves as the **single source of truth** for automatic type coercion (see Section 25).
 - `default_expr` is a raw SQL expression, not a Python value. Use `"now()"` not `datetime.now()`.
 - A column with `default_expr` or `identity` set is optional on insert -- the DB fills it in.
 - The `state` column must be included in `columns` (typically `ColumnDef(name="state", pg_type="text", nullable=False)`). The platform manages its value automatically.
@@ -203,14 +205,16 @@ An action is **pure CRUD + state transition**. It contains no custom business lo
 The runtime pipeline that makes actions safe. For every action call, it performs these steps in order:
 
 1. Look up the `ActionDef` (function type + transition)
-2. **PK generation** (for inserts): call the configured PK strategy
-3. **State injection**: add `state = to_state` to the data
-4. **CAS predicate** (for updates/deletes): build `WHERE state = from_state`
-5. **Call base function**: execute the prepared SQL
-6. **Error translation**: catch DB constraint errors, convert to structured `ActionError`
-7. **Transaction management**: auto-commit if standalone, skip if inside a handler
+2. **Input type coercion**: convert JSON values to Python types based on `ColumnDef.pg_type` (e.g., `"1990-05-20"` -> `date(1990, 5, 20)`, `"true"` -> `True`). See Section 25.
+3. **PK generation** (for inserts): call the configured PK strategy
+4. **State injection**: add `state = to_state` to the data
+5. **CAS predicate** (for updates/deletes): build `WHERE state = from_state`
+6. **Call base function**: execute the prepared SQL
+7. **Output type coercion**: convert asyncpg return values to JSON-safe types (e.g., `date` -> `"1990-05-20"`, `Decimal` -> `float`). See Section 25.
+8. **Error translation**: catch DB constraint errors, convert to structured `ActionError`
+9. **Transaction management**: auto-commit if standalone, skip if inside a handler
 
-The caller provides only business data. The executor handles PK, state, and transaction automatically.
+The caller provides only business data. The executor handles type coercion, PK, state, and transaction automatically.
 
 
 ## 11. DB Error Translation
@@ -220,6 +224,7 @@ The platform does **not** validate data in the application layer before sending 
 | Error Source                    | Error Code         | HTTP Status | Example                                               |
 | ------------------------------- | ------------------ | ----------- | ----------------------------------------------------- |
 | Invalid conditions / input      | `INVALID_INPUT`    | 400         | "Condition at index 0: unknown operator 'BETWEEN'"    |
+| Type coercion failure           | `INVALID_INPUT`    | 400         | "Cannot coerce 'abc' to date for column 'date_of_birth'" |
 | NOT NULL violation              | `FIELD_REQUIRED`   | 422         | "field 'full_name' cannot be null"                    |
 | FK violation (insert/update)    | `FK_VIOLATION`     | 422         | "referenced row does not exist in 'departments'"      |
 | FK violation (delete restrict)  | `FK_RESTRICT`      | 409         | "cannot delete: referenced by 'employees'"            |
@@ -244,6 +249,8 @@ Every registered table automatically gets 4 read-only query methods. No `ActionD
 | `exists`    | Check if any row matches conditions       |
 
 Queries are distinct from actions. Actions mutate data and enforce state transitions. Queries only read data and have no side effects.
+
+Type coercion applies to queries as well: condition values are coerced to the correct Python types (e.g., date strings in conditions become `date` objects), and returned rows are coerced to JSON-safe values. See Section 25.
 
 
 ## 13. Conditions
@@ -308,15 +315,15 @@ The central coordinator for the entire platform.
 - `register_table(config, create_if_not_exists=True)` -- validate config, optionally create the table, build executors, create `TableHandle`
 - `table("orders")` -- get the `TableHandle` for a registered table
 - `scan_handlers("handlers/")` -- discover and register handler files
-- `reload(tables_dir, handlers_dir)` -- production-safe hot reload with append-only checks
+- `reload(tables_dir, handlers_dir)` -- production-safe hot reload with append-only checks plus file-deletion based removals
 - `schema_catalog()` -- get read-only snapshot of all registered table configs and handlers
-- `create_app()` -- return a FastAPI app with all routes mounted
+- `create_app()` -- return a FastAPI app with action/query/handler/task routes mounted (admin routes are mounted separately)
 - `get_task_status(task_id)` -- poll an async handler's task status
 
 Three scenarios at `register_table()` time:
 1. **Table doesn't exist + `create_if_not_exists=True`**: generates DDL, creates the table
 2. **Table exists + schema matches**: registers normally, no DDL
-3. **Table exists + schema conflicts**: raises `SchemaConflictError` with detailed diff (column types, nullability, UNIQUE, CHECK, FK constraints)
+3. **Table exists + schema conflicts**: raises `SchemaConflictError` with detailed diff (column types, nullability, UNIQUE, column-level CHECK, table-level CHECK count, FK constraints)
 
 
 ## 16. Handler
@@ -434,7 +441,9 @@ When `register_table()` finds an existing table, it compares the database schema
 - **Column types**: normalized comparison (e.g., `varchar(255)` -> `character varying(255)`, `timestamptz` -> `timestamp with time zone`)
 - **Nullability**: `NOT NULL` vs `nullable`
 - **UNIQUE constraints**: single-column UNIQUE constraints
-- **CHECK constraints**: existence of CHECK constraints on columns
+- **CHECK constraints**:
+  - column-level CHECK presence (`ColumnDef.check`)
+  - table-level CHECK count (`TableConfig.table_constraints`)
 - **FK definitions**: `field`, `referenced_table`, `referenced_field`, `on_update`, `on_delete`
 
 Any mismatch raises `SchemaConflictError` with a detailed diff. The system never auto-alters existing tables.
@@ -442,15 +451,87 @@ Any mismatch raises `SchemaConflictError` with a detailed diff. The system never
 
 ## 24. Hot Reload and Schema Catalog
 
-Two admin capabilities are now part of the platform runtime model:
+Key registry-facing admin capabilities in the runtime model:
 
-- `POST /api/admin/reload`: re-scan `tables/` + `handlers/` and apply safe append-only updates without process restart.
+- `POST /api/admin/reload`: re-scan `tables/` + `handlers/`, apply safe append-only updates, and remove in-memory registrations for deleted files.
 - `GET /api/admin/schema-catalog`: return all currently registered table definitions and handler names as read-only JSON.
 
 Hot reload uses three phases:
 
 1. **Scan**: import each file in isolation; syntax/import errors are returned in `scan_errors` and do not interrupt service.
 2. **Diff**: enforce append-only rules on existing tables (`T2`-`T10`).
-3. **Execute**: stage new handles/configs and atomically swap them into registry on success.
+3. **Execute**: stage new handles/configs and atomically swap them into registry on success (including `tables_removed` / `handlers_removed` in the reload result when files were deleted).
 
 If diff rejects or execution fails, existing registry state remains usable. In-flight requests keep their old handle references, and new requests continue against the previous stable registry snapshot.
+
+
+## 25. Auto Type Coercion
+
+The platform automatically converts values between JSON types and Python/PostgreSQL types based on `ColumnDef.pg_type`. This eliminates the need for manual type handling in both Action API calls and handler code.
+
+**The problem it solves:** JSON has no `date`, `datetime`, `Decimal`, or strict `boolean` type. When a client sends `"date_of_birth": "1990-05-20"` (a string), asyncpg rejects it because PostgreSQL's binary protocol requires a Python `date` object. Previously, handler authors had to call `date.fromisoformat()` manually, and Action API callers had no way to pass date values at all.
+
+**How it works:** A `TypeCoercer` is built once per table at registration time. It reads each column's `pg_type`, parses the base type (e.g., `numeric(10,2)` -> `numeric`), and maps it to input and output coercion functions. At runtime, coercion is a O(data_fields) dict lookup per call -- negligible compared to the database round-trip.
+
+### Input coercion rules (JSON -> Python for asyncpg)
+
+| `pg_type`              | JSON input        | Python result           | Notes                               |
+| ---------------------- | ----------------- | ----------------------- | ----------------------------------- |
+| `boolean` / `bool`     | `true` / `false`  | `True` / `False`        | Passthrough                         |
+|                        | `"true"`, `"True"`, `"TRUE"`, `"1"`, `1` | `True` | String/int accepted      |
+|                        | `"false"`, `"False"`, `"FALSE"`, `"0"`, `0` | `False` |                       |
+| `integer` / `bigint` / `smallint` / `serial` | `42`    | `42`            | Passthrough                         |
+|                        | `"42"`            | `42`                    | String to int                       |
+|                        | `42.0`            | `42`                    | Float with no fraction accepted     |
+|                        | `42.5`            | `ValueError`            | Fractional part would be lost       |
+| `float8` / `float4` / `real` / `double` | `3.14` | `3.14`             | Passthrough                         |
+|                        | `"3.14"`          | `3.14`                  | String to float                     |
+| `numeric(p,s)` / `decimal` | `99.99`       | `99.99` (float)         | Passthrough (asyncpg accepts float) |
+|                        | `"99.99"`         | `Decimal("99.99")`      | String to Decimal (precise)         |
+| `date`                 | `"2025-01-15"`    | `date(2025, 1, 15)`     | ISO 8601 string                     |
+|                        | `date(2025,1,15)` | unchanged               | Idempotent (handler passes object)  |
+| `timestamp` / `timestamptz` | `"2025-01-15T10:30:00"` | `datetime(...)` | ISO with `T` separator        |
+|                        | `"2025-01-15 10:30:00"` | `datetime(...)`  | ISO with space separator            |
+|                        | `datetime(...)`   | unchanged               | Idempotent                          |
+| `text` / `varchar` / `char` / `json` / `uuid` | any | unchanged       | No coercion needed (passthrough)    |
+
+All input coercers handle `None` (nullable columns) by returning `None` unchanged. Invalid formats raise `ValueError`, which the `ActionExecutor` catches and converts to `ActionError(code=INVALID_INPUT)`.
+
+### Output coercion rules (Python -> JSON-safe)
+
+| Python type    | JSON output                    | Notes                                          |
+| -------------- | ------------------------------ | ---------------------------------------------- |
+| `date`         | `"2025-01-15"`                 | ISO 8601 date string                           |
+| `datetime`     | `"2025-01-15 10:30:00"`        | Space separator (matches Navicat/psql display) |
+| `Decimal`      | `99.99` (float)                | JSON has no decimal type                       |
+| `time`         | `"10:30:00"`                   | ISO 8601 time string                           |
+| `bool`, `int`, `float`, `str` | unchanged         | Already JSON-safe                              |
+
+### Where coercion applies
+
+**ActionExecutor** (write path):
+- Input: `coerce_input()` on data in `insert`, `bulk_insert`, `update`, `bulk_update`
+- Input: `coerce_conditions()` on conditions in `bulk_update`, `bulk_delete`
+- Output: `coerce_output()` on rows returned by `insert`, `update`, `delete`
+
+**QueryExecutor** (read path):
+- Input: `coerce_conditions()` on conditions in `list`, `count`, `exists`
+- Output: `coerce_output()` on rows returned by `get_by_pk`, `list`
+
+### Idempotency
+
+Every coercer checks `isinstance` before converting. If a handler already passes `date(1990, 5, 20)` (a Python object), the coercer returns it unchanged. This means existing handler code that does manual conversion continues to work without modification.
+
+### Error handling
+
+When coercion fails (e.g., `"abc"` for a `date` column), a `ValueError` is raised with a descriptive message:
+
+```
+Cannot coerce 'abc' to date for column 'date_of_birth'
+```
+
+The `ActionExecutor` catches this and converts it to `ActionError(code=INVALID_INPUT)`, which results in HTTP 400 with a clear error message. The transaction is rolled back before the error is raised, so no partial data is committed.
+
+### Performance
+
+The `TypeCoercer` is constructed once at table registration time (O(columns)). Each `coerce_input`/`coerce_output` call at runtime is O(data_fields) with a dict lookup per field. No regex or reflection runs at coercion time. For a typical 10-column table, coercion adds ~10 microseconds per action call -- negligible compared to the 1-5ms database round-trip.

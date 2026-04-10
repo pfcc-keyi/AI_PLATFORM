@@ -19,8 +19,6 @@ Payload (PERSON):
 
 Endpoint: POST /api/handlers/create_party
 """
-from datetime import date
-
 from lib.handler.errors import HandlerError
 
 MODE = "sync"
@@ -83,8 +81,6 @@ async def handle(ctx, payload: dict) -> dict:
             "last_name":  payload["last_name"],
             **_pick(payload, _PERSON_OPTIONAL),
         }
-        if "date_of_birth" in person_data and isinstance(person_data["date_of_birth"], str):
-            person_data["date_of_birth"] = date.fromisoformat(person_data["date_of_birth"])
         person = await ctx.party_person.create_party_person_active(data=person_data)
 
         return {"party": party["data"], "party_person": person["data"]}

@@ -15,7 +15,7 @@ from typing import Any
 from crewai import Agent, Crew, Process, Task, TaskOutput
 
 from config import EMBEDDER_CONFIG, OPENAI_MODEL
-from setup.knowledge_setup import get_handler_knowledge
+from setup.knowledge_setup import get_docs_knowledge, get_handler_knowledge
 from tools.admin import DPFileReadTool, DPNameResolveTool, DPSchemaCatalogTool
 
 _HANDLER_EXAMPLE_PATH = os.path.join(
@@ -65,8 +65,13 @@ class HandlerCrew:
         handler_name: str = "",
         handler_design=None,
     ) -> Crew:
+        docs_k = get_docs_knowledge()
         handler_k = get_handler_knowledge()
-        knowledge_sources = [handler_k] if handler_k else []
+        knowledge_sources = []
+        if docs_k:
+            knowledge_sources.append(docs_k)
+        if handler_k:
+            knowledge_sources.append(handler_k)
 
         generator = Agent(
             role="Data Platform Handler Generator",
@@ -80,6 +85,11 @@ class HandlerCrew:
                 "- Access tables via ctx.{table_name}, call actions via ctx.{table_name}.{action_name}(data={...})\n"
                 "- Each action returns {\"data\": {...}} with the row including the PK\n"
                 "- All ctx calls share one BEGIN/COMMIT transaction -- atomicity is automatic\n\n"
+                "HANDLER CONTRACT (from handler guide):\n"
+                "- File name determines handler name; no decorators/registration needed\n"
+                "- Signature must remain exactly async def handle(ctx, payload)\n"
+                "- MODE must be exactly \"sync\" or \"async\"\n"
+                "- Keep output JSON-serializable and rely on action/handler conventions from docs\n\n"
                 "DATE HANDLING (critical):\n"
                 "- JSON payloads carry dates as strings. If a column has pg_type='date' or 'timestamp',\n"
                 "  you MUST convert with date.fromisoformat() / datetime.fromisoformat() before passing to the action.\n"
