@@ -12,16 +12,21 @@ Tools available to the agent:
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from crewai import Agent
 
 from config import OPENAI_MODEL
 from models.ops_models import ChatResponse, ConfirmAction
+from setup.schema_sync import get_schema_catalog
 from tools.admin import DPFileReadTool, DPNameResolveTool, ListHandlerFilesTool
 from tools.data_platform import DPHandlerTool
 
 logger = logging.getLogger(__name__)
+
+_ASYNC_POLL_INTERVAL = 2
+_ASYNC_MAX_POLLS = 30
 
 
 def _is_mock_request(message: str) -> bool:
@@ -79,12 +84,27 @@ def _example_value_for_field(name: str) -> Any:
     return f"mock_{name}"
 
 
+def _registered_handlers() -> list[str]:
+    catalog = get_schema_catalog()
+    if not catalog:
+        return []
+    return list(catalog.get("handlers", []))
+
+
 def _infer_handler_name(message: str, context: dict[str, Any]) -> str:
-    hint = context.get("handler_name", "")
-    if hint:
-        return hint
-    m = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", message or "")
-    return m.group(1) if m else ""
+    for key in ("handler_name", "action_hint"):
+        hint = context.get(key, "")
+        if hint:
+            return hint
+
+    registered = _registered_handlers()
+    if not registered:
+        return ""
+    normalized = (message or "").lower().replace("-", "_").replace(" ", "_")
+    for name in sorted(registered, key=len, reverse=True):
+        if name in normalized:
+            return name
+    return ""
 
 
 def _build_handler_mock_scaffold(message: str, context: dict[str, Any]) -> tuple[str, str]:
@@ -186,6 +206,23 @@ def handle_execution(
             "   - Output a JSON block with key 'confirm_payload' containing:\n"
             '     {"confirm_payload": {"handler_name": "<name>", "payload": {<fields>}}}\n'
             "   - Do NOT call dp_handler directly until the user explicitly confirms.\n\n"
+            "AUTO TYPE COERCION:\n"
+            "- The platform automatically converts JSON strings to correct DB types.\n"
+            "- Date strings like '2025-01-15' are auto-coerced to date objects.\n"
+            "- Boolean strings ('true'/'false'), numeric strings are also auto-converted.\n"
+            "- Do NOT ask users to manually format values -- just accept strings.\n\n"
+            "ASYNC HANDLERS:\n"
+            "- If the handler source has MODE = 'async', execution returns a task_id.\n"
+            "- Tell the user the handler is running in the background.\n\n"
+            "ERROR INTERPRETATION:\n"
+            "When a handler fails, explain the error code to the user:\n"
+            "- HANDLER_ERROR: business validation failed -- check message for details\n"
+            "- ACTION_FAILED: a DB action inside the handler failed; check detail.failed_action\n"
+            "  Common sub-codes: FK_VIOLATION (referenced record doesn't exist), "
+            "STATE_MISMATCH (row not in expected state), UNIQUE_VIOLATION (duplicate value), "
+            "CHECK_VIOLATION (constraint failed), FIELD_REQUIRED (missing NOT NULL field)\n"
+            "- HANDLER_RUNTIME_ERROR: bug in handler code\n"
+            "- All actions are rolled back on any error (atomic transaction).\n\n"
             "RULES:\n"
             "- Only use the four tools provided. No other tools.\n"
             "- Always confirm with the user before executing.\n"
@@ -243,6 +280,29 @@ def handle_execution(
     return ChatResponse(response_type="message", message=raw)
 
 
+def _poll_async_task(task_id: str) -> dict[str, Any]:
+    """Poll an async handler task until completion or timeout."""
+    import httpx
+    from config import DATA_PLATFORM_URL
+    from tools.data_platform import _api_headers
+
+    for _ in range(_ASYNC_MAX_POLLS):
+        time.sleep(_ASYNC_POLL_INTERVAL)
+        try:
+            resp = httpx.get(
+                f"{DATA_PLATFORM_URL}/api/tasks/{task_id}",
+                headers=_api_headers(),
+                timeout=10,
+            )
+            data = resp.json()
+            status = data.get("status", "")
+            if status in ("completed", "failed"):
+                return data
+        except Exception as exc:
+            logger.warning("Task poll error: %s", exc)
+    return {"status": "timeout", "task_id": task_id, "message": "Polling timed out"}
+
+
 def execute_confirmed(action: ConfirmAction) -> ChatResponse:
     try:
         details = action.details
@@ -267,12 +327,19 @@ def execute_confirmed(action: ConfirmAction) -> ChatResponse:
         except (json.JSONDecodeError, TypeError):
             result = {"raw": result_raw}
 
-        success = result.get("success", False)
+        task_id = result.get("task_id")
+        if task_id and result.get("status") == "accepted":
+            result = _poll_async_task(task_id)
+
+        success = result.get("success", False) or result.get("status") == "completed"
         result_json = json.dumps(result, indent=2)
         if success:
             msg = f"Handler `{handler_name}` executed successfully!\n\n```\n{result_json}\n```"
         else:
             msg = f"Handler `{handler_name}` failed:\n\n```\n{result_json}\n```"
+            error = result.get("error", {})
+            if isinstance(error, dict) and error.get("code"):
+                msg += f"\n\nError code: **{error['code']}** — {error.get('message', '')}"
 
         return ChatResponse(response_type="result", message=msg)
     except Exception as e:

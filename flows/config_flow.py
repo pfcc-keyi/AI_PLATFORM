@@ -254,15 +254,18 @@ class ConfigFlow(Flow[ConfigState]):
                 "- File: handlers/{name}.py with MODE = 'sync' or 'async'\n"
                 "- Entry: async def handle(ctx, payload: dict) -> dict\n"
                 "- ctx.{table_name}.{action_name}(data={...}) for mutations\n"
-                "- ctx.raw_query(sql, params) for read-only SQL (JOINs, aggregations)\n"
-                "- All ctx calls share one BEGIN/COMMIT transaction\n\n"
-                "DATE HANDLING:\n"
-                "- JSON payloads carry dates as strings\n"
-                "- If a column has pg_type='date' or 'timestamp', convert with "
-                "date.fromisoformat() before passing to the action\n\n"
+                "- ctx.{table_name}.get_by_pk(pk), .list(conditions=[...]), .count(...), .exists(...) for reads\n"
+                "- ctx.raw_query(sql, params) for read-only SQL (JOINs, aggregations); params use $1,$2 syntax\n"
+                "- All ctx calls share one BEGIN/COMMIT transaction (read-your-writes)\n\n"
+                "AUTO TYPE COERCION (important):\n"
+                "- The platform automatically converts JSON strings to correct DB types "
+                "(date, datetime, numeric, boolean) via TypeCoercer in ActionExecutor.\n"
+                "- Do NOT manually call date.fromisoformat() or similar -- just pass strings directly.\n"
+                "- Coercion is idempotent: if a handler already converts, it still works, but it is unnecessary.\n\n"
                 "ERROR HANDLING:\n"
                 "- raise HandlerError(message=..., code=..., http_status=...) for business errors\n"
-                "- ActionError from table actions is auto-translated\n\n"
+                "- Import: from lib.handler.errors import HandlerError (and ActionError if catching)\n"
+                "- ActionError from table actions is auto-translated; catch only when custom messages needed\n\n"
                 "EXTRACT vs ASK:\n"
                 "- User mentioned specific tables/actions → use dp_name_resolve to verify, extract directly\n"
                 "- User gave payload fields → extract directly\n"
@@ -279,7 +282,7 @@ class ConfigFlow(Flow[ConfigState]):
                 "- tables_used: list of registered table names (verify with dp_name_resolve)\n"
                 "- steps: ordered list of HandlerStep, each with table_name + action_name "
                 "OR is_raw_query=true + raw_query_description\n"
-                "- payload_fields: what the caller sends (name, type, required, date_conversion)\n"
+                "- payload_fields: what the caller sends (name, type, required)\n"
                 "- error_handling: description of error strategy\n"
                 "- return_description: what the handler returns"
             ),
@@ -304,8 +307,7 @@ class ConfigFlow(Flow[ConfigState]):
             "  - Handler name (or derive from the purpose)\n"
             "  - Tables and actions mentioned → use dp_name_resolve to verify they exist\n"
             "  - Use dp_file_read to read table configs for column/action details\n"
-            "  - Payload fields the user described\n"
-            "  - Any date fields that need conversion\n\n"
+            "  - Payload fields the user described\n\n"
             "STEP 2 — CHECK what is MISSING:\n"
             "  Check 'Previous clarifications' first. Do NOT re-ask answered questions.\n"
             "  If ANY of these are still unclear:\n"
@@ -319,7 +321,7 @@ class ConfigFlow(Flow[ConfigState]):
             "  - mode: 'sync' unless user specified async\n"
             "  - description: one-line summary of what the handler does\n"
             "  - tables_used: verified table names\n"
-            "  - payload_fields: each with name, field_type, required, date_conversion\n"
+            "  - payload_fields: each with name, field_type, required\n"
             "  - steps: ordered list (step_number, description, table_name, action_name, "
             "is_raw_query, raw_query_description, input_mapping, output_key)\n"
             "  - error_handling: describe validation and error strategy\n"
@@ -948,7 +950,7 @@ class ConfigFlow(Flow[ConfigState]):
                 "- mode: 'sync' (default) or 'async'\n"
                 "- tables_used: list of registered table names\n"
                 "- steps: ordered list with table_name + action_name or raw_query\n"
-                "- payload_fields: name, field_type, required, date_conversion\n"
+                "- payload_fields: name, field_type, required\n"
                 "- error_handling: describe validation strategy\n"
                 "- return_description: what the handler returns"
             ),
@@ -1260,7 +1262,7 @@ class ConfigFlow(Flow[ConfigState]):
                     "name": f.name,
                     "type": f.field_type,
                     "nullable": not f.required,
-                    "check": "date conversion" if f.date_conversion else None,
+                    "check": f.description if f.description else None,
                     "default_expr": None,
                     "unique": False,
                 }

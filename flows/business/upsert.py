@@ -130,7 +130,8 @@ def _build_schema_context() -> str:
     for tname, tinfo in tables.items():
         cols = [
             f"{c.get('name','')}({c.get('pg_type','')}, "
-            f"{'nullable' if c.get('nullable') else 'required'})"
+            f"{'nullable' if c.get('nullable') else 'required'}"
+            f"{', check: ' + c['check'] if c.get('check') else ''})"
             for c in tinfo.get("columns", [])
             if c.get("name") != "state"
         ]
@@ -144,12 +145,22 @@ def _build_schema_context() -> str:
 
         states = tinfo.get("states", [])
         pk = tinfo.get("pk_field", "id")
-        lines.append(
+
+        fk_lines: list[str] = []
+        for fk in tinfo.get("fk_definitions", []):
+            fk_lines.append(
+                f"{fk.get('field', '?')} -> {fk.get('references_table', '?')}.{fk.get('references_field', '?')}"
+            )
+
+        table_block = (
             f"Table: {tname}  pk={pk}\n"
             f"  columns (excluding state): {', '.join(cols)}\n"
             f"  states: {', '.join(states)}\n"
             f"  allowed actions: {', '.join(actions)}"
         )
+        if fk_lines:
+            table_block += f"\n  foreign keys: {'; '.join(fk_lines)}"
+        lines.append(table_block)
 
     return "\n".join(lines)
 
@@ -210,6 +221,21 @@ def _allowed_actions(table_info: dict[str, Any]) -> list[dict[str, Any]]:
     return actions
 
 
+def _resolve_action_hint(message: str, context: dict[str, Any], catalog: dict[str, Any]) -> str:
+    """Return the best-guess action name from context or message."""
+    hint = _normalize_token(context.get("action_hint", ""))
+    if hint:
+        return hint
+    normalized = _normalize_token(message)
+    tables = catalog.get("tables", {})
+    for tinfo in tables.values():
+        for action in tinfo.get("actions", []):
+            aname = _normalize_token(action.get("name", ""))
+            if aname and aname in normalized:
+                return aname
+    return ""
+
+
 def _candidate_tables(message: str, context: dict[str, Any], catalog: dict[str, Any]) -> list[str]:
     tables = catalog.get("tables", {})
     if not tables:
@@ -225,7 +251,7 @@ def _candidate_tables(message: str, context: dict[str, Any], catalog: dict[str, 
         if tname in normalized and tname not in candidates:
             candidates.append(tname)
 
-    action_hint = _normalize_token(context.get("action_hint", ""))
+    action_hint = _resolve_action_hint(message, context, catalog)
     if action_hint and not candidates:
         for tname, tinfo in tables.items():
             if any(_normalize_token(a.get("name", "")) == action_hint for a in tinfo.get("actions", [])):
@@ -250,14 +276,23 @@ def _build_upsert_mock_scaffold(message: str, context: dict[str, Any]) -> str:
             "- After table selection, build mock payload with minimum required fields + optional enrichments."
         )
 
+    action_hint = _resolve_action_hint(message, context, catalog)
+
     sections: list[str] = []
     for tname in selected_tables:
         tinfo = catalog["tables"].get(tname, {})
         cols = _safe_columns(tinfo)
         required_insert = _insert_required_fields(tinfo)
         optional_fields = [c.get("name", "") for c in cols if c.get("name") not in required_insert]
+
+        target_actions = _allowed_actions(tinfo)
+        if action_hint:
+            matched = [a for a in target_actions if _normalize_token(a.get("name", "")) == action_hint]
+            if matched:
+                target_actions = matched
+
         action_lines: list[str] = []
-        for action in _allowed_actions(tinfo):
+        for action in target_actions:
             action_name = action.get("name", "")
             ft = str(action.get("function_type", "")).lower()
             transition = _action_transition_text(action)
@@ -277,22 +312,33 @@ def _build_upsert_mock_scaffold(message: str, context: dict[str, Any]) -> str:
                 action_lines.append(
                     f"- {action_name} ({ft}, {transition}): minimum payload {{conditions: [[field, op, value]], data: {{...}}}}"
                 )
+
         table_constraints = tinfo.get("table_constraints", []) or []
         check_constraints = [
             f"{c.get('name')}: {c.get('check')}"
             for c in cols if c.get("check")
         ]
-        sections.append(
-            "\n".join([
-                f"Table `{tname}` mock scaffold:",
-                f"- Required for insert-like actions: {required_insert if required_insert else 'none'}",
-                f"- Optional enrichments (include as many as possible): {optional_fields if optional_fields else 'none'}",
-                f"- Column checks to satisfy: {check_constraints if check_constraints else 'none'}",
-                f"- Table constraints to satisfy: {table_constraints if table_constraints else 'none'}",
-                "- Action minimum payloads:",
-                *action_lines,
-            ])
-        )
+        fk_notes: list[str] = []
+        for fk in tinfo.get("fk_definitions", []):
+            fk_notes.append(
+                f"{fk.get('field', '?')} must reference existing record in "
+                f"{fk.get('references_table', '?')}.{fk.get('references_field', '?')}"
+            )
+
+        lines = [
+            f"Table `{tname}` mock scaffold:",
+            f"- Required for insert-like actions: {required_insert if required_insert else 'none'}",
+            f"- Optional enrichments (include as many as possible): {optional_fields if optional_fields else 'none'}",
+            f"- Column checks to satisfy: {check_constraints if check_constraints else 'none'}",
+            f"- Table constraints to satisfy: {table_constraints if table_constraints else 'none'}",
+        ]
+        if fk_notes:
+            lines.append(f"- FK constraints (values must exist): {fk_notes}")
+        if action_hint and len(target_actions) == 1:
+            lines.append(f"- USER SPECIFIED ACTION: use `{target_actions[0].get('name', '')}` for this operation")
+        lines.append("- Action minimum payloads:")
+        lines.extend(action_lines)
+        sections.append("\n".join(lines))
 
     return "\n\n".join(sections)
 
@@ -386,15 +432,36 @@ def handle_upsert(
             "6. DO NOT execute dp_safe_action until the user confirms.\n\n"
             "ABSOLUTE RULES:\n"
             "- NEVER execute delete or bulk_delete actions.\n"
-            "- NEVER include 'state' in the payload.\n"
+            "- NEVER include 'state' in the payload -- state is managed by the platform via CAS.\n"
             "- ONLY use insert, update, bulk_insert, bulk_update actions.\n"
             "- Confirm with the user before EVERY execution.\n"
             "- You can only execute actions, NOT handlers or queries.\n\n"
             "ACTION PAYLOAD FORMATS:\n"
-            "- insert: {\"data\": {field: value, ...}}\n"
-            "- update: {\"pk\": \"...\", \"data\": {field: value, ...}}\n"
+            "- insert: {\"data\": {field: value, ...}} -- do NOT include PK (auto-generated) or state\n"
+            "- update: {\"pk\": \"...\", \"data\": {field: value, ...}} -- partial update, only changed fields\n"
             "- bulk_insert: {\"rows\": [{field: value}, ...]}\n"
-            "- bulk_update: {\"conditions\": [[field, op, value]], \"data\": {field: value}}\n\n"
+            "- bulk_update: {\"conditions\": [[field, op, value]], \"data\": {field: value}} "
+            "-- platform auto-appends state=from_state to WHERE clause\n\n"
+            "CONDITION OPERATORS (for bulk_update conditions):\n"
+            "=, !=, >, <, >=, <=, IN, NOT IN, LIKE, ILIKE, IS NULL, IS NOT NULL\n"
+            "Each condition is [field, operator, value]. IS NULL / IS NOT NULL ignore value.\n\n"
+            "AUTO TYPE COERCION:\n"
+            "- The platform automatically converts JSON strings to correct DB types.\n"
+            "- Date strings like '2025-01-15' are auto-coerced to date objects.\n"
+            "- Boolean strings ('true'/'false'), numeric strings are also auto-converted.\n"
+            "- Do NOT ask users to manually format values -- just accept strings.\n\n"
+            "FK CONSTRAINTS:\n"
+            "- Foreign key columns must reference existing records in the referenced table.\n"
+            "- If the schema shows a FK (e.g. party_id -> party.party_id), the value must be a real PK.\n"
+            "- For mock data, tell the user which FK values need to exist.\n\n"
+            "ERROR INTERPRETATION:\n"
+            "When an action fails, explain the error code to the user:\n"
+            "- FK_VIOLATION: referenced record doesn't exist (check FK column values)\n"
+            "- STATE_MISMATCH: row not in expected state for this action\n"
+            "- UNIQUE_VIOLATION: duplicate value on a unique column\n"
+            "- CHECK_VIOLATION: CHECK constraint failed (value out of range, etc.)\n"
+            "- FIELD_REQUIRED: missing a NOT NULL column with no default\n"
+            "- INVALID_INPUT: bad payload shape or type coercion failure\n\n"
             f"PLATFORM SCHEMA:\n{schema_context}"
         ),
         tools=[SafeActionTool(), DPAPICatalogTool(), UpsertTableFileReadTool()],
