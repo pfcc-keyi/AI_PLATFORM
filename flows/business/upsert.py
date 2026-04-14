@@ -165,237 +165,6 @@ def _build_schema_context() -> str:
     return "\n".join(lines)
 
 
-def _normalize_token(text: str) -> str:
-    return (text or "").lower().replace("-", "_").replace(" ", "_")
-
-
-def _is_mock_request(message: str) -> bool:
-    lower = (message or "").lower()
-    if any(k in lower for k in ("mock", "sample", "dummy", "fake", "test data")):
-        return True
-    return any(k in (message or "") for k in ("模拟", "样例", "示例", "测试数据", "mock数据", "假数据"))
-
-
-def _safe_columns(table_info: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        c for c in table_info.get("columns", [])
-        if c.get("name") and c.get("name") != "state"
-    ]
-
-
-def _insert_required_fields(table_info: dict[str, Any]) -> list[str]:
-    cols = _safe_columns(table_info)
-    pk = table_info.get("pk_field", "")
-    pk_strategy = str(table_info.get("pk_strategy", "")).lower()
-    required: list[str] = []
-    for c in cols:
-        name = c.get("name", "")
-        if not name:
-            continue
-        if c.get("nullable"):
-            continue
-        if c.get("identity") is True:
-            continue
-        if c.get("default_expr"):
-            continue
-        if name == pk and pk_strategy in ("uuid4", "sequence"):
-            continue
-        required.append(name)
-    return required
-
-
-def _action_transition_text(action_def: dict[str, Any]) -> str:
-    transition = action_def.get("transition", "")
-    if isinstance(transition, dict):
-        return f"{transition.get('from_state', '?')}->{transition.get('to_state', '?')}"
-    return str(transition)
-
-
-def _allowed_actions(table_info: dict[str, Any]) -> list[dict[str, Any]]:
-    actions: list[dict[str, Any]] = []
-    for action in table_info.get("actions", []):
-        ft = str(action.get("function_type", "")).lower()
-        if ft in _BLOCKED_FUNCTION_TYPES:
-            continue
-        actions.append(action)
-    return actions
-
-
-def _resolve_action_hint(message: str, context: dict[str, Any], catalog: dict[str, Any]) -> str:
-    """Return the best-guess action name from context or message."""
-    hint = _normalize_token(context.get("action_hint", ""))
-    if hint:
-        return hint
-    normalized = _normalize_token(message)
-    tables = catalog.get("tables", {})
-    for tinfo in tables.values():
-        for action in tinfo.get("actions", []):
-            aname = _normalize_token(action.get("name", ""))
-            if aname and aname in normalized:
-                return aname
-    return ""
-
-
-def _candidate_tables(message: str, context: dict[str, Any], catalog: dict[str, Any]) -> list[str]:
-    tables = catalog.get("tables", {})
-    if not tables:
-        return []
-
-    candidates: list[str] = []
-    ctx_table = context.get("table", "")
-    if ctx_table in tables:
-        candidates.append(ctx_table)
-
-    normalized = _normalize_token(message)
-    for tname in tables.keys():
-        if tname in normalized and tname not in candidates:
-            candidates.append(tname)
-
-    action_hint = _resolve_action_hint(message, context, catalog)
-    if action_hint and not candidates:
-        for tname, tinfo in tables.items():
-            if any(_normalize_token(a.get("name", "")) == action_hint for a in tinfo.get("actions", [])):
-                candidates.append(tname)
-                break
-
-    return candidates[:3]
-
-
-def _build_upsert_mock_scaffold(message: str, context: dict[str, Any]) -> str:
-    if not _is_mock_request(message):
-        return ""
-    catalog = get_schema_catalog()
-    if not catalog or not catalog.get("tables"):
-        return ""
-
-    selected_tables = _candidate_tables(message, context, catalog)
-    if not selected_tables:
-        return (
-            "Mock request detected, but target table is not clear.\n"
-            "- Ask the user to pick one table first.\n"
-            "- After table selection, build mock payload with minimum required fields + optional enrichments."
-        )
-
-    action_hint = _resolve_action_hint(message, context, catalog)
-
-    sections: list[str] = []
-    for tname in selected_tables:
-        tinfo = catalog["tables"].get(tname, {})
-        cols = _safe_columns(tinfo)
-        required_insert = _insert_required_fields(tinfo)
-        optional_fields = [c.get("name", "") for c in cols if c.get("name") not in required_insert]
-
-        target_actions = _allowed_actions(tinfo)
-        if action_hint:
-            matched = [a for a in target_actions if _normalize_token(a.get("name", "")) == action_hint]
-            if matched:
-                target_actions = matched
-
-        action_lines: list[str] = []
-        for action in target_actions:
-            action_name = action.get("name", "")
-            ft = str(action.get("function_type", "")).lower()
-            transition = _action_transition_text(action)
-            if ft == "insert":
-                action_lines.append(
-                    f"- {action_name} ({ft}, {transition}): minimum payload {{data: {{{', '.join(required_insert)}}}}}"
-                )
-            elif ft == "bulk_insert":
-                action_lines.append(
-                    f"- {action_name} ({ft}, {transition}): minimum payload {{rows: [{{{', '.join(required_insert)}}}]}}"
-                )
-            elif ft == "update":
-                action_lines.append(
-                    f"- {action_name} ({ft}, {transition}): minimum payload {{pk: <{tinfo.get('pk_field','pk')}>, data: {{...}}}}"
-                )
-            elif ft == "bulk_update":
-                action_lines.append(
-                    f"- {action_name} ({ft}, {transition}): minimum payload {{conditions: [[field, op, value]], data: {{...}}}}"
-                )
-
-        table_constraints = tinfo.get("table_constraints", []) or []
-        check_constraints = [
-            f"{c.get('name')}: {c.get('check')}"
-            for c in cols if c.get("check")
-        ]
-        fk_notes: list[str] = []
-        for fk in tinfo.get("fk_definitions", []):
-            fk_notes.append(
-                f"{fk.get('field', '?')} must reference existing record in "
-                f"{fk.get('references_table', '?')}.{fk.get('references_field', '?')}"
-            )
-
-        lines = [
-            f"Table `{tname}` mock scaffold:",
-            f"- Required for insert-like actions: {required_insert if required_insert else 'none'}",
-            f"- Optional enrichments (include as many as possible): {optional_fields if optional_fields else 'none'}",
-            f"- Column checks to satisfy: {check_constraints if check_constraints else 'none'}",
-            f"- Table constraints to satisfy: {table_constraints if table_constraints else 'none'}",
-        ]
-        if fk_notes:
-            lines.append(f"- FK constraints (values must exist): {fk_notes}")
-        if action_hint and len(target_actions) == 1:
-            lines.append(f"- USER SPECIFIED ACTION: use `{target_actions[0].get('name', '')}` for this operation")
-        lines.append("- Action minimum payloads:")
-        lines.extend(action_lines)
-        sections.append("\n".join(lines))
-
-    return "\n\n".join(sections)
-
-
-def _validate_minimum_payload(table_name: str, action_name: str, payload: dict[str, Any]) -> tuple[bool, str]:
-    catalog = get_schema_catalog()
-    if not catalog:
-        return True, ""
-    tables = catalog.get("tables", {})
-    tinfo = tables.get(table_name, {})
-    if not tinfo:
-        return True, ""
-
-    action_def = None
-    for action in tinfo.get("actions", []):
-        if action.get("name") == action_name:
-            action_def = action
-            break
-    if not action_def:
-        return True, ""
-
-    ft = str(action_def.get("function_type", "")).lower()
-    missing: list[str] = []
-    if ft == "insert":
-        data = payload.get("data", {})
-        if not isinstance(data, dict):
-            return False, "For insert, payload must include an object at key `data`."
-        for field in _insert_required_fields(tinfo):
-            if field not in data:
-                missing.append(f"data.{field}")
-    elif ft == "bulk_insert":
-        rows = payload.get("rows", [])
-        if not isinstance(rows, list) or not rows:
-            return False, "For bulk_insert, payload must include a non-empty `rows` array."
-        for field in _insert_required_fields(tinfo):
-            if field not in rows[0]:
-                missing.append(f"rows[0].{field}")
-    elif ft == "update":
-        if payload.get("pk") in (None, ""):
-            missing.append("pk")
-        if "data" not in payload or not isinstance(payload.get("data"), dict):
-            missing.append("data")
-    elif ft == "bulk_update":
-        if not isinstance(payload.get("conditions"), list) or not payload.get("conditions"):
-            missing.append("conditions")
-        if "data" not in payload or not isinstance(payload.get("data"), dict):
-            missing.append("data")
-
-    if missing:
-        return False, (
-            "Payload is missing minimum required keys for this action: "
-            + ", ".join(missing)
-            + ". Please补全这些字段后再确认执行。"
-        )
-    return True, ""
-
-
 def handle_upsert(
     message: str,
     history: list[dict[str, Any]],
@@ -454,6 +223,15 @@ def handle_upsert(
             "- Foreign key columns must reference existing records in the referenced table.\n"
             "- If the schema shows a FK (e.g. party_id -> party.party_id), the value must be a real PK.\n"
             "- For mock data, tell the user which FK values need to exist.\n\n"
+            "MOCK / TEST DATA:\n"
+            "- When the user asks to generate mock, sample, test, or demo data, "
+            "  use dp_file_read to read the table definition and understand its full schema.\n"
+            "- Identify which columns are required (NOT NULL, no default) vs optional.\n"
+            "- Generate realistic, contextually appropriate values -- real-looking names, "
+            "  valid dates, sensible enum values, plausible codes. "
+            "  NEVER use placeholders like 'mock_xxx' or 'SAMPLE_ID_001'.\n"
+            "- Respect CHECK constraints and FK constraints when generating values.\n"
+            "- Include as many optional fields as reasonable to produce rich test data.\n\n"
             "ERROR INTERPRETATION:\n"
             "When an action fails, explain the error code to the user:\n"
             "- FK_VIOLATION: referenced record doesn't exist (check FK column values)\n"
@@ -474,29 +252,12 @@ def handle_upsert(
     if history_text:
         prompt += f"Conversation so far:\n{history_text}\n\n"
     prompt += f"User message: {message}"
-    mock_scaffold = _build_upsert_mock_scaffold(message, context)
-    if mock_scaffold:
-        prompt += (
-            "\n\nMOCK-DATA REQUIREMENT DETECTED.\n"
-            "Use the deterministic scaffold below as hard minimums for confirm_action payloads.\n"
-            "When mocking: include all minimum required fields first, then enrich with optional fields as many as possible.\n"
-            "Also ensure check/table constraints are satisfied.\n\n"
-            f"{mock_scaffold}"
-        )
 
     result = agent.kickoff(prompt)
     raw = result.raw if result else ""
 
     confirm_data = _try_extract_confirmation(raw)
     if confirm_data:
-        details = confirm_data.details
-        ok, err = _validate_minimum_payload(
-            table_name=details.get("table_name", ""),
-            action_name=details.get("action_name", ""),
-            payload=details.get("payload", {}) if isinstance(details.get("payload", {}), dict) else {},
-        )
-        if not ok:
-            return ChatResponse(response_type="message", message=err)
         return ChatResponse(
             response_type="confirm",
             message=_strip_json_block(raw),
