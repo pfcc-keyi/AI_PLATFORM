@@ -17,7 +17,7 @@ from typing import Any
 
 from crewai import Agent
 
-from config import OPENAI_MODEL
+from config import EMBEDDER_CONFIG, OPENAI_MODEL
 from models.ops_models import ChatResponse
 from setup.knowledge_setup import get_docs_knowledge
 from setup.schema_sync import get_schema_catalog
@@ -237,7 +237,7 @@ def handle_enquiry(
     recent = history[-8:]
     if len(recent) > 1:
         history_text = "\n".join(
-            f"{m['role']}: {m['content'][:300]}" for m in recent[:-1]
+            f"{m['role']}: {m['content'][:2000]}" for m in recent[:-1]
         )
 
     agent = Agent(
@@ -288,9 +288,21 @@ def handle_enquiry(
         verbose=True,
     )
 
+    agent.set_knowledge(crew_embedder=EMBEDDER_CONFIG)
+
+    knowledge_context = ""
+    if agent.knowledge:
+        snippets = agent.knowledge.query([message])
+        if snippets:
+            valid = [s["content"] for s in snippets if s and s.get("content")]
+            if valid:
+                knowledge_context = "\n".join(valid)
+
     prompt = ""
     if history_text:
         prompt += f"Conversation so far:\n{history_text}\n\n"
+    if knowledge_context:
+        prompt += f"Retrieved knowledge:\n{knowledge_context}\n\n"
     if prefetched_tool_context:
         prompt += (
             "Server-fetched tool evidence for this question "

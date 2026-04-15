@@ -176,7 +176,7 @@ def handle_upsert(
     recent = history[-10:]
     if len(recent) > 1:
         history_text = "\n".join(
-            f"{m['role']}: {m['content'][:300]}" for m in recent[:-1]
+            f"{m['role']}: {m['content'][:2000]}" for m in recent[:-1]
         )
 
     agent = Agent(
