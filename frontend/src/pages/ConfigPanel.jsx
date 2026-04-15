@@ -668,8 +668,8 @@ export default function ConfigPanel() {
           {analysis.questions.map((q, i) => (
             <div key={i} style={styles.questionBox}>
               <label style={{ ...styles.label, color: "#ccc", fontWeight: 500 }}>{q}</label>
-              <input
-                style={styles.input}
+              <textarea
+                style={{ ...styles.textarea, minHeight: 44, marginTop: "0.25rem" }}
                 value={answers[q] || ""}
                 onChange={(e) => setAnswers({ ...answers, [q]: e.target.value })}
                 placeholder="Your answer..."

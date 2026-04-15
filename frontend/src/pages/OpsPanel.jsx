@@ -49,6 +49,7 @@ const s = {
     fontSize: "0.9rem",
     lineHeight: 1.5,
     wordBreak: "break-word",
+    whiteSpace: "pre-wrap",
   },
   assistantMsg: {
     alignSelf: "flex-start",
@@ -68,6 +69,7 @@ const s = {
     flexShrink: 0,
     padding: "0.6rem 0 0.25rem",
     borderTop: "1px solid #222",
+    alignItems: "flex-end",
   },
   input: {
     flex: 1,
@@ -79,6 +81,8 @@ const s = {
     fontSize: "0.9rem",
     fontFamily: "inherit",
     outline: "none",
+    resize: "none",
+    lineHeight: 1.5,
   },
   sendBtn: {
     padding: "0.7rem 1.25rem",
@@ -740,6 +744,7 @@ export default function OpsPanel() {
     const userMsg = { role: "user", content: text };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
+    if (inputRef.current) inputRef.current.style.height = "auto";
     setLoading(true);
 
     try {
@@ -795,6 +800,18 @@ export default function OpsPanel() {
   function handleChooseFlow(flowName) {
     sendMessage(flowGreetings[flowName] || `I want to use ${flowName.replace(/_/g, " ")}`);
   }
+
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el) {
+      el.style.height = "auto";
+      const h = Math.min(el.scrollHeight, 200);
+      el.style.height = h + "px";
+      el.style.overflowY = el.scrollHeight > 200 ? "auto" : "hidden";
+    }
+  }, [input]);
 
   function handleKeyDown(e) {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -855,12 +872,14 @@ export default function OpsPanel() {
       </div>
 
       <div style={s.inputRow}>
-        <input
+        <textarea
+          ref={inputRef}
           style={s.input}
+          rows={1}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type a message..."
+          placeholder="Type a message... (Shift+Enter for new line)"
           disabled={loading}
         />
         <button
