@@ -4,7 +4,9 @@ import { NavLink, Outlet } from "react-router-dom";
 const navStyle = {
   display: "flex",
   gap: "1rem",
-  padding: "1rem 2rem",
+  flexWrap: "wrap",
+  alignItems: "center",
+  padding: "1rem clamp(1rem, 3vw, 2rem)",
   borderBottom: "1px solid #222",
   background: "#111",
 };
@@ -47,7 +49,7 @@ export default function App() {
           Operations Panel
         </NavLink>
       </nav>
-      <main style={{ padding: "2rem" }}>
+      <main style={{ padding: "clamp(1rem, 3vw, 2rem)" }}>
         <Outlet />
       </main>
     </div>

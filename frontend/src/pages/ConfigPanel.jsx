@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from "react";
 import { configApi } from "../lib/api";
 
 const styles = {
-  container: { maxWidth: 960, margin: "0 auto" },
+  container: { maxWidth: 960, margin: "0 auto", width: "100%" },
   heading: { fontSize: "1.5rem", fontWeight: 700, margin: 0 },
   textarea: {
     width: "100%", minHeight: 100, padding: "0.75rem", borderRadius: 8,
@@ -63,21 +63,43 @@ const styles = {
     fontSize: "0.72rem", fontWeight: 600, marginLeft: "0.5rem",
   },
   table: {
-    width: "100%", borderCollapse: "collapse", marginTop: "0.5rem", fontSize: "0.82rem",
+    width: "100%",
+    borderCollapse: "collapse",
+    fontSize: "0.82rem",
+    tableLayout: "fixed",
+  },
+  tableShell: {
+    marginTop: "0.5rem",
+    border: "1px solid #222",
+    borderRadius: 8,
+    overflowX: "auto",
+    background: "#121217",
   },
   th: {
     textAlign: "left", padding: "0.4rem 0.6rem", borderBottom: "1px solid #333",
-    color: "#888", fontWeight: 500,
+    color: "#888", fontWeight: 500, verticalAlign: "top", whiteSpace: "normal",
   },
   td: {
-    padding: "0.4rem 0.6rem", borderBottom: "1px solid #222", color: "#ccc",
+    padding: "0.4rem 0.6rem",
+    borderBottom: "1px solid #222",
+    color: "#ccc",
+    verticalAlign: "top",
+    whiteSpace: "normal",
+    overflowWrap: "anywhere",
+    wordBreak: "break-word",
+    lineHeight: 1.5,
+  },
+  monoCell: {
+    fontFamily: "monospace",
+    fontSize: "0.78rem",
+    color: "#d1d5db",
   },
   card: {
     background: "#1a1a1a", border: "1px solid #333", borderRadius: 8,
     padding: "1rem",
   },
   tabRow: {
-    display: "flex", gap: 0, borderBottom: "1px solid #333", marginBottom: "0.75rem",
+    display: "flex", gap: 0, borderBottom: "1px solid #333", marginBottom: "0.75rem", flexWrap: "wrap",
   },
   tab: (active) => ({
     padding: "0.4rem 1rem", fontSize: "0.8rem", fontWeight: 500, cursor: "pointer",
@@ -132,6 +154,70 @@ function StateDiagram({ transitions, states }) {
   );
 }
 
+function ReviewTable({ columns, rows, emptyText = "No data available" }) {
+  const hasWidths = columns.some((column) => column.width);
+
+  return (
+    <div style={styles.tableShell}>
+      <table style={styles.table}>
+        {hasWidths && (
+          <colgroup>
+            {columns.map((column) => (
+              <col
+                key={column.key || column.label}
+                style={column.width ? { width: column.width } : undefined}
+              />
+            ))}
+          </colgroup>
+        )}
+        <thead>
+          <tr>
+            {columns.map((column) => (
+              <th key={column.key || column.label} style={styles.th}>
+                {column.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length > 0 ? (
+            rows.map((row, rowIndex) => (
+              <tr key={row.key || row.name || row.field || rowIndex}>
+                {columns.map((column) => {
+                  const value = column.render ? column.render(row, rowIndex) : row[column.key];
+                  const displayValue =
+                    value === null || value === undefined || value === "" ? "\u2014" : value;
+                  return (
+                    <td
+                      key={column.key || column.label}
+                      style={{
+                        ...styles.td,
+                        ...(column.mono ? styles.monoCell : {}),
+                        ...(column.cellStyle || {}),
+                      }}
+                    >
+                      {displayValue}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))
+          ) : (
+            <tr>
+              <td
+                colSpan={columns.length}
+                style={{ ...styles.td, color: "#666", textAlign: "center" }}
+              >
+                {emptyText}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ReviewSummary({ summary, defaultView = "table" }) {
   const [view, setView] = useState(defaultView);
   const [copied, setCopied] = useState(false);
@@ -151,6 +237,16 @@ function ReviewSummary({ summary, defaultView = "table" }) {
   else if (summary.pk_strategy === "custom") pkDetail = "user-provided value";
 
   const jsonText = JSON.stringify(summary, null, 2);
+  const fieldColumns = (summary.columns || []).map((c) => {
+    const constraints = [];
+    if (c.check) constraints.push(isHandler ? c.check : `check: ${c.check}`);
+    if (c.default_expr) constraints.push(`default: ${c.default_expr}`);
+    if (c.unique) constraints.push("unique");
+    return {
+      ...c,
+      notes: constraints.length > 0 ? constraints.join(", ") : "\u2014",
+    };
+  });
 
   function handleCopy() {
     navigator.clipboard.writeText(jsonText).then(() => {
@@ -161,8 +257,8 @@ function ReviewSummary({ summary, defaultView = "table" }) {
 
   return (
     <div style={styles.card}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h3 style={{ margin: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.75rem", flexWrap: "wrap" }}>
+        <h3 style={{ margin: 0, overflowWrap: "anywhere" }}>
           {summary.table_name}
           <span style={{ ...styles.badge, background: categoryColor, color: "#fff" }}>
             {summary.table_category}
@@ -195,7 +291,7 @@ function ReviewSummary({ summary, defaultView = "table" }) {
         <>
           <div style={{ marginTop: "0.75rem" }}>
             <span style={styles.label}>{isHandler ? "Mode" : "Primary Key"}</span>
-            <span style={{ color: "#e5e5e5" }}>
+            <span style={{ color: "#e5e5e5", overflowWrap: "anywhere" }}>
               {isHandler ? "" : summary.pk_field}
               <span style={{ ...styles.badge, background: strategyColor, color: "#fff" }}>
                 {summary.pk_strategy}
@@ -215,101 +311,72 @@ function ReviewSummary({ summary, defaultView = "table" }) {
 
           <div style={{ marginTop: "0.75rem" }}>
             <span style={styles.label}>{isHandler ? "Payload Fields" : "Columns"}</span>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>{isHandler ? "Field" : "Name"}</th>
-                  <th style={styles.th}>Type</th>
-                  <th style={styles.th}>{isHandler ? "Required" : "Nullable"}</th>
-                  <th style={styles.th}>{isHandler ? "Notes" : "Constraints"}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(summary.columns || []).map((c, i) => {
-                  const constraints = [];
-                  if (c.check) constraints.push(isHandler ? c.check : `check: ${c.check}`);
-                  if (c.default_expr) constraints.push(`default: ${c.default_expr}`);
-                  if (c.unique) constraints.push("unique");
-                  return (
-                    <tr key={i}>
-                      <td style={styles.td}>{c.name}</td>
-                      <td style={{ ...styles.td, fontFamily: "monospace" }}>{c.type}</td>
-                      <td style={styles.td}>{isHandler ? (c.nullable ? "optional" : "required") : (c.nullable ? "yes" : "no")}</td>
-                      <td style={{ ...styles.td, fontSize: "0.78rem", color: "#999" }}>
-                        {constraints.length > 0 ? constraints.join(", ") : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+            <ReviewTable
+              rows={fieldColumns}
+              emptyText={isHandler ? "No payload fields" : "No columns"}
+              columns={[
+                { label: isHandler ? "Field" : "Name", key: "name", width: "22%" },
+                { label: "Type", key: "type", width: "18%", mono: true },
+                {
+                  label: isHandler ? "Required" : "Nullable",
+                  width: "14%",
+                  render: (c) => (isHandler ? (c.nullable ? "optional" : "required") : (c.nullable ? "yes" : "no")),
+                },
+                {
+                  label: isHandler ? "Notes" : "Constraints",
+                  key: "notes",
+                  width: "46%",
+                  cellStyle: { fontSize: "0.78rem", color: "#999" },
+                },
+              ]}
+            />
           </div>
 
           <div style={{ marginTop: "0.75rem" }}>
             <span style={styles.label}>{isHandler ? "Handler Steps" : "Actions"}</span>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>{isHandler ? "Step" : "Name"}</th>
-                  <th style={styles.th}>{isHandler ? "Operation" : "Type"}</th>
-                  <th style={styles.th}>{isHandler ? "Output" : "Transition"}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(summary.actions || []).map((a, i) => (
-                  <tr key={i}>
-                    <td style={styles.td}>{a.name}</td>
-                    <td style={{ ...styles.td, fontFamily: "monospace" }}>{a.type}</td>
-                    <td style={{ ...styles.td, fontFamily: "monospace" }}>{a.transition}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <ReviewTable
+              rows={summary.actions || []}
+              emptyText={isHandler ? "No handler steps" : "No actions"}
+              columns={isHandler ? [
+                { label: "Step", key: "name", width: "42%" },
+                { label: "Operation", key: "type", width: "38%", mono: true },
+                { label: "Output", key: "transition", width: "20%", mono: true },
+              ] : [
+                { label: "Name", key: "name", width: "28%" },
+                { label: "Type", key: "type", width: "22%", mono: true },
+                { label: "Transition", key: "transition", width: "50%", mono: true },
+              ]}
+            />
           </div>
 
           {summary.fk_definitions?.length > 0 && (
             <div style={{ marginTop: "0.75rem" }}>
               <span style={styles.label}>{isHandler ? "Tables Used" : "Foreign Keys"}</span>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>{isHandler ? "Relation" : "Field"}</th>
-                    <th style={styles.th}>{isHandler ? "Table" : "References"}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.fk_definitions.map((fk, i) => (
-                    <tr key={i}>
-                      <td style={styles.td}>{fk.field}</td>
-                      <td style={{ ...styles.td, fontFamily: "monospace" }}>
-                        {isHandler ? fk.references_table : `${fk.references_table}.${fk.references_field}`}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <ReviewTable
+                rows={summary.fk_definitions}
+                columns={[
+                  { label: isHandler ? "Relation" : "Field", key: "field", width: "22%" },
+                  {
+                    label: isHandler ? "Table" : "References",
+                    width: "78%",
+                    mono: true,
+                    render: (fk) => (isHandler ? fk.references_table : `${fk.references_table}.${fk.references_field}`),
+                  },
+                ]}
+              />
             </div>
           )}
 
           {!isHandler && summary.table_constraints?.length > 0 && (
             <div style={{ marginTop: "0.75rem" }}>
               <span style={styles.label}>Table Constraints</span>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>#</th>
-                    <th style={styles.th}>SQL Expression</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {summary.table_constraints.map((expr, i) => (
-                    <tr key={i}>
-                      <td style={{ ...styles.td, width: 48 }}>{i + 1}</td>
-                      <td style={{ ...styles.td, fontFamily: "monospace" }}>{expr}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <ReviewTable
+                rows={summary.table_constraints.map((expr, i) => ({ index: i + 1, expr }))}
+                columns={[
+                  { label: "#", key: "index", width: 48 },
+                  { label: "SQL Expression", key: "expr", mono: true },
+                ]}
+              />
             </div>
           )}
         </>
@@ -524,7 +591,7 @@ export default function ConfigPanel() {
       <style>{`@keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }`}</style>
 
       {/* ── Header ── */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap", marginBottom: "1.5rem" }}>
         <div>
           <h1 style={styles.heading}>Configuration Panel</h1>
           <p style={{ color: "#666", fontSize: "0.82rem", margin: "0.25rem 0 0" }}>
@@ -555,7 +622,7 @@ export default function ConfigPanel() {
           placeholder='e.g. "Add a new PartyContact table, ContactId is PK, PartyId is FK to party, Name is NOT NULL and > 2 chars"'
           disabled={loading}
         />
-        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: "0.6rem" }}>
+        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.6rem" }}>
           <button
             style={styles.button}
             onClick={handleAnalyze}
@@ -641,7 +708,7 @@ export default function ConfigPanel() {
                 placeholder='e.g. "change on_delete to CASCADE", "add a bulk_update action", "remove the department column"'
                 disabled={loading}
               />
-              <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.6rem" }}>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.6rem" }}>
                 <button style={styles.button} onClick={handleReviseDesign} disabled={loading || !editFeedback.trim()}>
                   {loading ? "Revising..." : "Apply Changes"}
                 </button>
@@ -653,7 +720,7 @@ export default function ConfigPanel() {
           ) : null}
 
           {/* Action buttons */}
-          <div style={{ display: "flex", gap: "0.75rem", marginTop: "1rem" }}>
+          <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "1rem" }}>
             <button style={styles.buttonGreen} onClick={handleConfirm} disabled={loading}>
               {loading ? `Generating... (${elapsed}s)` : "Confirm & Generate Code"}
             </button>
@@ -772,7 +839,7 @@ export default function ConfigPanel() {
                   : 'e.g. "use secrets instead of random for PK generation", "remove the unique constraint on contact_id"'}
                 disabled={loading}
               />
-              <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.5rem" }}>
+              <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
                 <button
                   style={styles.button}
                   onClick={handleRequestChanges}
