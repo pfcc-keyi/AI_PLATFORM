@@ -114,7 +114,7 @@ export function renderConfirmCard(
   const parsed = executionResult ? parseResultJson(executionResult.message) : null
   const isSuccess = parsed?.success === true || executionResult?.message?.toLowerCase().includes('successfully')
   const titleColor = isDone ? (isSuccess ? colors.greenLight : colors.yellow) : colors.accentLight
-  const titleText = isDone ? (isSuccess ? 'Executed' : 'Failed') : 'Confirm Action'
+  const titleText = isDone ? (isSuccess ? 'Executed' : 'Failed') : (data.action_type === 'handler' ? 'Handler Confirm' : 'Confirm Action')
   drawText(ctx, titleText, x + CARD_PAD, y, fonts.smallSemibold, titleColor)
 
   if (isDone) {

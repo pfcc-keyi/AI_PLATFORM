@@ -26,6 +26,7 @@ export type TableData = {
 }
 
 export type ConfirmData = {
+  action_type?: string
   details?: Record<string, unknown>
 }
 

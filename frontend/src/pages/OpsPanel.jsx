@@ -267,7 +267,7 @@ function ConfirmRenderer({ data, onConfirm, loading, executionResult }) {
     <div style={s.confirmCard}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <span style={{ color: isDone ? (resultIsSuccess ? "#4ade80" : "#fbbf24") : "#93c5fd", fontWeight: 600, fontSize: "0.9rem" }}>
-          {isDone ? (resultIsSuccess ? "Executed" : "Failed") : "Confirm Action"}
+          {isDone ? (resultIsSuccess ? "Executed" : "Failed") : (data.action_type === "handler" ? "Handler Confirm" : "Confirm Action")}
         </span>
         {isDone && (
           <span style={{
