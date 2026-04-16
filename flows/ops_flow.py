@@ -24,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 AVAILABLE_FLOWS = {
     "general_enquiry": "Ask questions about the data platform, tables, actions, concepts",
-    "handler_execution": "Execute a business handler/workflow on the data platform (e.g. create_party)",
+    "handler_execution": "Execute a registered handler (multi-table business workflow in handlers/ directory, e.g. create_party). Only for handler names listed under 'Handlers'.",
     "data_query": "Query data from platform tables (list, get_by_pk, count, exists)",
-    "upsert": "Insert or update records in platform tables via actions",
+    "upsert": "Execute a single-table ACTION on a platform table. This includes when a user mentions a specific action name from a table's actions list (e.g. create_party_draft, activate_party, submit_order) or says they want to insert/update records.",
 }
 
 
@@ -162,6 +162,13 @@ class OpsSession:
                 "in the current flow, return intent='continue'. If the message "
                 "doesn't clearly match any flow, return intent='unclear'.\n\n"
                 f"Available flows:\n{flow_descriptions}\n\n"
+                "ROUTING RULES (important):\n"
+                "- If user mentions a name that matches an ACTION in a table's actions list "
+                "(e.g. 'create_party_draft', 'activate_party', 'submit_order'), "
+                "classify as 'upsert' and set action_hint to that action name.\n"
+                "- Only classify as 'handler_execution' when user mentions a name from "
+                "the Handlers list (these are multi-table workflows, not single-table actions).\n"
+                "- 'insert into X' or 'update X table' without a specific action name → 'upsert'.\n\n"
                 f"Current active flow: {current or 'none'}\n\n"
                 f"Platform schema:\n{schema}"
             ),
