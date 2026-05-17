@@ -42,9 +42,23 @@ _OPENAI_DEFAULT_BASES = {"https://api.openai.com/v1", "https://api.openai.com/v1
 
 _original_prepare = OpenAICompletion._prepare_completion_params
 
+def _resolve_base_url(self) -> str:
+    """Resolve the active OpenAI client base_url across CrewAI versions.
+
+    Older upstream exposed `self.client.base_url`; newer upstream uses the
+    private `self._client` and surfaces config via `self.base_url` /
+    `self.api_base` directly on the LLM instance.
+    """
+    direct = getattr(self, "base_url", None) or getattr(self, "api_base", None)
+    if direct:
+        return str(direct)
+    client = getattr(self, "_client", None) or getattr(self, "client", None)
+    return str(getattr(client, "base_url", "") or "")
+
+
 def _patched_prepare(self, messages, tools=None):
     params = _original_prepare(self, messages, tools)
-    base = str(getattr(self, "client", None) and self.client.base_url or "")
+    base = _resolve_base_url(self)
     if base.rstrip("/") not in _OPENAI_DEFAULT_BASES and "/" in _OPENAI_MODEL_NAME:
         params["model"] = _OPENAI_MODEL_NAME
     return params

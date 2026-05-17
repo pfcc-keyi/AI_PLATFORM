@@ -6,20 +6,20 @@ import time
 from typing import Any
 import uuid
 
+from crewai_core.settings import Settings
 from rich.console import Console
 from rich.panel import Panel
 
-from crewai.cli.authentication.token import AuthError, get_auth_token
-from crewai.cli.config import Settings
-from crewai.cli.constants import DEFAULT_CREWAI_ENTERPRISE_URL
-from crewai.cli.plus_api import PlusAPI
-from crewai.cli.version import get_crewai_version
+from crewai.auth.token import AuthError, get_auth_token
+from crewai.constants import DEFAULT_CREWAI_ENTERPRISE_URL
 from crewai.events.listeners.tracing.types import TraceEvent
 from crewai.events.listeners.tracing.utils import (
     get_user_id,
     is_tracing_enabled_in_context,
     should_auto_collect_first_time_traces,
 )
+from crewai.plus_api import PlusAPI
+from crewai.version import get_crewai_version
 
 
 logger = getLogger(__name__)
@@ -81,8 +81,11 @@ class TraceBatchManager:
         """Initialize a new trace batch (thread-safe)"""
         with self._batch_ready_cv:
             if self.current_batch is not None:
+                # Lazy init (e.g. DefaultEnvEvent) may have created the batch without
+                # execution_type; merge metadata from a later flow/crew initializer.
+                self.current_batch.execution_metadata.update(execution_metadata)
                 logger.debug(
-                    "Batch already initialized, skipping duplicate initialization"
+                    "Batch already initialized, merged execution metadata and skipped duplicate initialization"
                 )
                 return self.current_batch
 

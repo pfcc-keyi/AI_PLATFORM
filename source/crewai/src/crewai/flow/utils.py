@@ -22,6 +22,7 @@ import inspect
 import textwrap
 from typing import TYPE_CHECKING, Any
 
+from crewai_core.printer import PRINTER
 from typing_extensions import TypeIs
 
 from crewai.flow.constants import AND_CONDITION, OR_CONDITION
@@ -32,13 +33,10 @@ from crewai.flow.flow_wrappers import (
     SimpleFlowCondition,
 )
 from crewai.flow.types import FlowMethodCallable, FlowMethodName
-from crewai.utilities.printer import Printer
 
 
 if TYPE_CHECKING:
     from crewai.flow.flow import Flow
-
-_printer = Printer()
 
 
 def _extract_string_literals_from_type_annotation(
@@ -181,7 +179,7 @@ def get_possible_return_constants(
         return None
     except Exception as e:
         if verbose:
-            _printer.print(
+            PRINTER.print(
                 f"Error retrieving source code for function {function.__name__}: {e}",
                 color="red",
             )
@@ -194,27 +192,27 @@ def get_possible_return_constants(
         code_ast = ast.parse(source)
     except IndentationError as e:
         if verbose:
-            _printer.print(
+            PRINTER.print(
                 f"IndentationError while parsing source code of {function.__name__}: {e}",
                 color="red",
             )
-            _printer.print(f"Source code:\n{source}", color="yellow")
+            PRINTER.print(f"Source code:\n{source}", color="yellow")
         return None
     except SyntaxError as e:
         if verbose:
-            _printer.print(
+            PRINTER.print(
                 f"SyntaxError while parsing source code of {function.__name__}: {e}",
                 color="red",
             )
-            _printer.print(f"Source code:\n{source}", color="yellow")
+            PRINTER.print(f"Source code:\n{source}", color="yellow")
         return None
     except Exception as e:
         if verbose:
-            _printer.print(
+            PRINTER.print(
                 f"Unexpected error while parsing source code of {function.__name__}: {e}",
                 color="red",
             )
-            _printer.print(f"Source code:\n{source}", color="yellow")
+            PRINTER.print(f"Source code:\n{source}", color="yellow")
         return None
 
     return_values: set[str] = set()
@@ -395,13 +393,13 @@ def get_possible_return_constants(
                 StateAttributeVisitor().visit(class_ast)
             except Exception as e:
                 if verbose:
-                    _printer.print(
+                    PRINTER.print(
                         f"Could not analyze class context for {function.__name__}: {e}",
                         color="yellow",
                     )
     except Exception as e:
         if verbose:
-            _printer.print(
+            PRINTER.print(
                 f"Could not introspect class for {function.__name__}: {e}",
                 color="yellow",
             )

@@ -10,26 +10,42 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict
 import httpx
 from openai import APIConnectionError, AsyncOpenAI, NotFoundError, OpenAI, Stream
 from openai.lib.streaming.chat import ChatCompletionStream
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionChunk,
+    ChatCompletionMessageFunctionToolCall,
+)
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import ChoiceDelta
-from openai.types.responses import Response
-from pydantic import BaseModel
+from openai.types.responses import (
+    Response,
+    ResponseCodeInterpreterToolCall,
+    ResponseComputerToolCall,
+    ResponseFileSearchToolCall,
+    ResponseFunctionToolCall,
+    ResponseFunctionWebSearch,
+    ResponseReasoningItem,
+)
+from pydantic import BaseModel, PrivateAttr, model_validator
 
 from crewai.events.types.llm_events import LLMCallType
-from crewai.llms.base_llm import BaseLLM, llm_call_context
+from crewai.llms.base_llm import BaseLLM, JsonResponseFormat, llm_call_context
+from crewai.llms.hooks.base import BaseInterceptor
 from crewai.llms.hooks.transport import AsyncHTTPTransport, HTTPTransport
+from crewai.llms.providers.utils.common import safe_tool_conversion
 from crewai.utilities.agent_utils import is_context_length_exceeded
 from crewai.utilities.exceptions.context_window_exceeding_exception import (
     LLMContextLengthExceededError,
 )
-from crewai.utilities.pydantic_schema_utils import generate_model_description
+from crewai.utilities.pydantic_schema_utils import (
+    generate_model_description,
+    sanitize_tool_params_for_openai_strict,
+)
 from crewai.utilities.types import LLMMessage
 
 
 if TYPE_CHECKING:
-    from crewai.agent.core import Agent
-    from crewai.llms.hooks.base import BaseInterceptor
+    from crewai.agents.agent_builder.base_agent import BaseAgent
     from crewai.task import Task
     from crewai.tools.base_tool import BaseTool
 
@@ -176,6 +192,8 @@ class OpenAICompletion(BaseLLM):
             chain-of-thought without storing data on OpenAI servers.
     """
 
+    llm_type: Literal["openai"] = "openai"
+
     BUILTIN_TOOL_TYPES: ClassVar[dict[str, str]] = {
         "web_search": "web_search_preview",
         "file_search": "file_search",
@@ -183,113 +201,96 @@ class OpenAICompletion(BaseLLM):
         "computer_use": "computer_use_preview",
     }
 
-    def __init__(
-        self,
-        model: str = "gpt-4o",
-        api_key: str | None = None,
-        base_url: str | None = None,
-        organization: str | None = None,
-        project: str | None = None,
-        timeout: float | None = None,
-        max_retries: int = 2,
-        default_headers: dict[str, str] | None = None,
-        default_query: dict[str, Any] | None = None,
-        client_params: dict[str, Any] | None = None,
-        temperature: float | None = None,
-        top_p: float | None = None,
-        frequency_penalty: float | None = None,
-        presence_penalty: float | None = None,
-        max_tokens: int | None = None,
-        max_completion_tokens: int | None = None,
-        seed: int | None = None,
-        stream: bool = False,
-        response_format: dict[str, Any] | type[BaseModel] | None = None,
-        logprobs: bool | None = None,
-        top_logprobs: int | None = None,
-        reasoning_effort: str | None = None,
-        provider: str | None = None,
-        interceptor: BaseInterceptor[httpx.Request, httpx.Response] | None = None,
-        api: Literal["completions", "responses"] = "completions",
-        instructions: str | None = None,
-        store: bool | None = None,
-        previous_response_id: str | None = None,
-        include: list[str] | None = None,
-        builtin_tools: list[str] | None = None,
-        parse_tool_outputs: bool = False,
-        auto_chain: bool = False,
-        auto_chain_reasoning: bool = False,
-        **kwargs: Any,
-    ) -> None:
-        """Initialize OpenAI completion client."""
+    model: str = "gpt-4o"
+    organization: str | None = None
+    project: str | None = None
+    timeout: float | None = None
+    max_retries: int = 2
+    default_headers: dict[str, str] | None = None
+    default_query: dict[str, Any] | None = None
+    client_params: dict[str, Any] | None = None
+    top_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    seed: int | None = None
+    stream: bool = False
+    response_format: JsonResponseFormat | type[BaseModel] | None = None
+    logprobs: bool | None = None
+    top_logprobs: int | None = None
+    reasoning_effort: str | None = None
+    interceptor: BaseInterceptor[httpx.Request, httpx.Response] | None = None
+    api: Literal["completions", "responses"] = "completions"
+    instructions: str | None = None
+    store: bool | None = None
+    previous_response_id: str | None = None
+    include: list[str] | None = None
+    builtin_tools: list[str] | None = None
+    parse_tool_outputs: bool = False
+    auto_chain: bool = False
+    auto_chain_reasoning: bool = False
+    api_base: str | None = None
+    is_o1_model: bool = False
+    is_gpt4_model: bool = False
 
-        if provider is None:
-            provider = kwargs.pop("provider", "openai")
+    _client: Any = PrivateAttr(default=None)
+    _async_client: Any = PrivateAttr(default=None)
+    _last_response_id: str | None = PrivateAttr(default=None)
+    _last_reasoning_items: list[Any] | None = PrivateAttr(default=None)
 
-        self.interceptor = interceptor
-        # Client configuration attributes
-        self.organization = organization
-        self.project = project
-        self.max_retries = max_retries
-        self.default_headers = default_headers
-        self.default_query = default_query
-        self.client_params = client_params
-        self.timeout = timeout
-        self.base_url = base_url
-        self.api_base = kwargs.pop("api_base", None)
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_openai_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if not data.get("provider"):
+            data["provider"] = "openai"
+        data["api_key"] = data.get("api_key") or os.getenv("OPENAI_API_KEY")
+        # Extract api_base from kwargs if present
+        if "api_base" not in data:
+            data["api_base"] = None
+        model = data.get("model", "gpt-4o")
+        data["is_o1_model"] = "o1" in model.lower()
+        data["is_gpt4_model"] = "gpt-4" in model.lower()
+        return data
 
-        super().__init__(
-            model=model,
-            temperature=temperature,
-            api_key=api_key or os.getenv("OPENAI_API_KEY"),
-            base_url=base_url,
-            timeout=timeout,
-            provider=provider,
-            **kwargs,
-        )
+    @model_validator(mode="after")
+    def _init_clients(self) -> OpenAICompletion:
+        """Eagerly build clients when the API key is available, otherwise
+        defer so ``LLM(model="openai/...")`` can be constructed at module
+        import time even before deployment env vars are set.
+        """
+        try:
+            self._client = self._build_sync_client()
+            self._async_client = self._build_async_client()
+        except ValueError:
+            pass
+        return self
 
+    def _build_sync_client(self) -> Any:
         client_config = self._get_client_params()
         if self.interceptor:
             transport = HTTPTransport(interceptor=self.interceptor)
-            http_client = httpx.Client(transport=transport)
-            client_config["http_client"] = http_client
+            client_config["http_client"] = httpx.Client(transport=transport)
+        return OpenAI(**client_config)
 
-        self.client = OpenAI(**client_config)
-
-        async_client_config = self._get_client_params()
+    def _build_async_client(self) -> Any:
+        client_config = self._get_client_params()
         if self.interceptor:
-            async_transport = AsyncHTTPTransport(interceptor=self.interceptor)
-            async_http_client = httpx.AsyncClient(transport=async_transport)
-            async_client_config["http_client"] = async_http_client
+            transport = AsyncHTTPTransport(interceptor=self.interceptor)
+            client_config["http_client"] = httpx.AsyncClient(transport=transport)
+        return AsyncOpenAI(**client_config)
 
-        self.async_client = AsyncOpenAI(**async_client_config)
+    def _get_sync_client(self) -> Any:
+        if self._client is None:
+            self._client = self._build_sync_client()
+        return self._client
 
-        # Completion parameters
-        self.top_p = top_p
-        self.frequency_penalty = frequency_penalty
-        self.presence_penalty = presence_penalty
-        self.max_tokens = max_tokens
-        self.max_completion_tokens = max_completion_tokens
-        self.seed = seed
-        self.stream = stream
-        self.response_format = response_format
-        self.logprobs = logprobs
-        self.top_logprobs = top_logprobs
-        self.reasoning_effort = reasoning_effort
-        self.is_o1_model = "o1" in model.lower()
-        self.is_gpt4_model = "gpt-4" in model.lower()
-
-        # API selection and Responses API parameters
-        self.api = api
-        self.instructions = instructions
-        self.store = store
-        self.previous_response_id = previous_response_id
-        self.include = include
-        self.builtin_tools = builtin_tools
-        self.parse_tool_outputs = parse_tool_outputs
-        self.auto_chain = auto_chain
-        self.auto_chain_reasoning = auto_chain_reasoning
-        self._last_response_id: str | None = None
-        self._last_reasoning_items: list[Any] | None = None
+    def _get_async_client(self) -> Any:
+        if self._async_client is None:
+            self._async_client = self._build_async_client()
+        return self._async_client
 
     @property
     def last_response_id(self) -> str | None:
@@ -394,7 +395,7 @@ class OpenAICompletion(BaseLLM):
         callbacks: list[Any] | None = None,
         available_functions: dict[str, Any] | None = None,
         from_task: Task | None = None,
-        from_agent: Agent | None = None,
+        from_agent: BaseAgent | None = None,
         response_model: type[BaseModel] | None = None,
     ) -> str | Any:
         """Call OpenAI API (Chat Completions or Responses based on api setting).
@@ -462,7 +463,7 @@ class OpenAICompletion(BaseLLM):
         tools: list[dict[str, BaseTool]] | None = None,
         available_functions: dict[str, Any] | None = None,
         from_task: Task | None = None,
-        from_agent: Agent | None = None,
+        from_agent: BaseAgent | None = None,
         response_model: type[BaseModel] | None = None,
     ) -> str | Any:
         """Call OpenAI Chat Completions API."""
@@ -494,7 +495,7 @@ class OpenAICompletion(BaseLLM):
         callbacks: list[Any] | None = None,
         available_functions: dict[str, Any] | None = None,
         from_task: Task | None = None,
-        from_agent: Agent | None = None,
+        from_agent: BaseAgent | None = None,
         response_model: type[BaseModel] | None = None,
     ) -> str | Any:
         """Async call to OpenAI API (Chat Completions or Responses).
@@ -557,7 +558,7 @@ class OpenAICompletion(BaseLLM):
         tools: list[dict[str, BaseTool]] | None = None,
         available_functions: dict[str, Any] | None = None,
         from_task: Task | None = None,
-        from_agent: Agent | None = None,
+        from_agent: BaseAgent | None = None,
         response_model: type[BaseModel] | None = None,
     ) -> str | Any:
         """Async call to OpenAI Chat Completions API."""
@@ -588,7 +589,7 @@ class OpenAICompletion(BaseLLM):
         tools: list[dict[str, BaseTool]] | None = None,
         available_functions: dict[str, Any] | None = None,
         from_task: Task | None = None,
-        from_agent: Agent | None = None,
+        from_agent: BaseAgent | None = None,
         response_model: type[BaseModel] | None = None,
     ) -> str | Any:
         """Call OpenAI Responses API."""
@@ -619,7 +620,7 @@ class OpenAICompletion(BaseLLM):
         tools: list[dict[str, BaseTool]] | None = None,
         available_functions: dict[str, Any] | None = None,
         from_task: Task | None = None,
-        from_agent: Agent | None = None,
+        from_agent: BaseAgent | None = None,
         response_model: type[BaseModel] | None = None,
     ) -> str | Any:
         """Async call to OpenAI Responses API."""
@@ -785,8 +786,6 @@ class OpenAICompletion(BaseLLM):
             "function": {"name": "...", "description": "...", "parameters": {...}}
         }
         """
-        from crewai.llms.providers.utils.common import safe_tool_conversion
-
         responses_tools = []
 
         for tool in tools:
@@ -818,7 +817,7 @@ class OpenAICompletion(BaseLLM):
     ) -> str | ResponsesAPIResult | Any:
         """Handle non-streaming Responses API call."""
         try:
-            response: Response = self.client.responses.create(**params)
+            response: Response = self._get_sync_client().responses.create(**params)
 
             # Track response ID for auto-chaining
             if self.auto_chain and response.id:
@@ -844,6 +843,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params.get("input", []),
+                    usage=usage,
                 )
 
                 return parsed_result
@@ -856,6 +856,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params.get("input", []),
+                    usage=usage,
                 )
                 return function_calls
 
@@ -893,6 +894,7 @@ class OpenAICompletion(BaseLLM):
                         from_task=from_task,
                         from_agent=from_agent,
                         messages=params.get("input", []),
+                        usage=usage,
                     )
                     return structured_result
                 except ValueError as e:
@@ -906,6 +908,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params.get("input", []),
+                usage=usage,
             )
 
             content = self._invoke_after_llm_call_hooks(
@@ -950,7 +953,9 @@ class OpenAICompletion(BaseLLM):
     ) -> str | ResponsesAPIResult | Any:
         """Handle async non-streaming Responses API call."""
         try:
-            response: Response = await self.async_client.responses.create(**params)
+            response: Response = await self._get_async_client().responses.create(
+                **params
+            )
 
             # Track response ID for auto-chaining
             if self.auto_chain and response.id:
@@ -976,6 +981,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params.get("input", []),
+                    usage=usage,
                 )
 
                 return parsed_result
@@ -988,6 +994,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params.get("input", []),
+                    usage=usage,
                 )
                 return function_calls
 
@@ -1025,6 +1032,7 @@ class OpenAICompletion(BaseLLM):
                         from_task=from_task,
                         from_agent=from_agent,
                         messages=params.get("input", []),
+                        usage=usage,
                     )
                     return structured_result
                 except ValueError as e:
@@ -1038,6 +1046,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params.get("input", []),
+                usage=usage,
             )
 
         except NotFoundError as e:
@@ -1080,8 +1089,9 @@ class OpenAICompletion(BaseLLM):
         full_response = ""
         function_calls: list[dict[str, Any]] = []
         final_response: Response | None = None
+        usage: dict[str, Any] | None = None
 
-        stream = self.client.responses.create(**params)
+        stream = self._get_sync_client().responses.create(**params)
         response_id_stream = None
 
         for event in stream:
@@ -1137,6 +1147,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params.get("input", []),
+                usage=usage,
             )
 
             return parsed_result
@@ -1173,6 +1184,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params.get("input", []),
+                    usage=usage,
                 )
                 return structured_result
             except ValueError as e:
@@ -1186,6 +1198,7 @@ class OpenAICompletion(BaseLLM):
             from_task=from_task,
             from_agent=from_agent,
             messages=params.get("input", []),
+            usage=usage,
         )
 
         return self._invoke_after_llm_call_hooks(
@@ -1204,8 +1217,9 @@ class OpenAICompletion(BaseLLM):
         full_response = ""
         function_calls: list[dict[str, Any]] = []
         final_response: Response | None = None
+        usage: dict[str, Any] | None = None
 
-        stream = await self.async_client.responses.create(**params)
+        stream = await self._get_async_client().responses.create(**params)
         response_id_stream = None
 
         async for event in stream:
@@ -1261,6 +1275,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params.get("input", []),
+                usage=usage,
             )
 
             return parsed_result
@@ -1297,6 +1312,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params.get("input", []),
+                    usage=usage,
                 )
                 return structured_result
             except ValueError as e:
@@ -1310,6 +1326,7 @@ class OpenAICompletion(BaseLLM):
             from_task=from_task,
             from_agent=from_agent,
             messages=params.get("input", []),
+            usage=usage,
         )
 
         return full_response
@@ -1329,18 +1346,22 @@ class OpenAICompletion(BaseLLM):
         ]
 
     def _extract_responses_token_usage(self, response: Response) -> dict[str, Any]:
-        """Extract token usage from Responses API response."""
+        """Extract token usage and response metadata from Responses API response."""
         if response.usage:
-            result = {
+            result: dict[str, Any] = {
                 "prompt_tokens": response.usage.input_tokens,
                 "completion_tokens": response.usage.output_tokens,
                 "total_tokens": response.usage.total_tokens,
             }
-            # Extract cached prompt tokens from input_tokens_details
             input_details = getattr(response.usage, "input_tokens_details", None)
             if input_details:
                 result["cached_prompt_tokens"] = (
                     getattr(input_details, "cached_tokens", 0) or 0
+                )
+            output_details = getattr(response.usage, "output_tokens_details", None)
+            if output_details:
+                result["reasoning_tokens"] = (
+                    getattr(output_details, "reasoning_tokens", 0) or 0
                 )
             return result
         return {"total_tokens": 0}
@@ -1363,105 +1384,102 @@ class OpenAICompletion(BaseLLM):
         )
 
         for item in response.output:
-            item_type = item.type
-
-            if item_type == "web_search_call":
+            if isinstance(item, ResponseFunctionWebSearch):
                 result.web_search_results.append(
                     WebSearchResult(
                         id=item.id,
-                        status=item.status,  # type: ignore[union-attr]
-                        type=item_type,
+                        status=item.status,
+                        type=item.type,
                     )
                 )
 
-            elif item_type == "file_search_call":
+            elif isinstance(item, ResponseFileSearchToolCall):
                 file_results: list[FileSearchResultItem] = (
                     [
                         FileSearchResultItem(
-                            file_id=r.file_id,  # type: ignore[union-attr]
-                            filename=r.filename,  # type: ignore[union-attr]
-                            text=r.text,  # type: ignore[union-attr]
-                            score=r.score,  # type: ignore[union-attr]
-                            attributes=r.attributes,  # type: ignore[union-attr]
+                            file_id=r.file_id,
+                            filename=r.filename,
+                            text=r.text,
+                            score=r.score,
+                            attributes=r.attributes,
                         )
-                        for r in item.results  # type: ignore[union-attr]
+                        for r in item.results
                     ]
-                    if item.results  # type: ignore[union-attr]
+                    if item.results
                     else []
                 )
                 result.file_search_results.append(
                     FileSearchResult(
                         id=item.id,
-                        status=item.status,  # type: ignore[union-attr]
-                        type=item_type,
-                        queries=list(item.queries),  # type: ignore[union-attr]
+                        status=item.status,
+                        type=item.type,
+                        queries=list(item.queries),
                         results=file_results,
                     )
                 )
 
-            elif item_type == "code_interpreter_call":
+            elif isinstance(item, ResponseCodeInterpreterToolCall):
                 code_results: list[
                     CodeInterpreterLogResult | CodeInterpreterFileResult
                 ] = []
-                for r in item.results:  # type: ignore[union-attr]
-                    if r.type == "logs":  # type: ignore[union-attr]
+                for r in item.outputs or []:
+                    if r.type == "logs":
                         code_results.append(
-                            CodeInterpreterLogResult(type="logs", logs=r.logs)  # type: ignore[union-attr]
+                            CodeInterpreterLogResult(type="logs", logs=r.logs)
                         )
-                    elif r.type == "files":  # type: ignore[union-attr]
-                        files_data = [
-                            {"file_id": f.file_id, "mime_type": f.mime_type}
-                            for f in r.files  # type: ignore[union-attr]
-                        ]
+                    elif r.type == "image":
                         code_results.append(
-                            CodeInterpreterFileResult(type="files", files=files_data)
+                            CodeInterpreterFileResult(
+                                type="files",
+                                files=[{"url": r.url}],
+                            )
                         )
                 result.code_interpreter_results.append(
                     CodeInterpreterResult(
                         id=item.id,
-                        status=item.status,  # type: ignore[union-attr]
-                        type=item_type,
-                        code=item.code,  # type: ignore[union-attr]
-                        container_id=item.container_id,  # type: ignore[union-attr]
+                        status=item.status,
+                        type=item.type,
+                        code=item.code,
+                        container_id=item.container_id,
                         results=code_results,
                     )
                 )
 
-            elif item_type == "computer_call":
-                action_dict = item.action.model_dump() if item.action else {}  # type: ignore[union-attr]
+            elif isinstance(item, ResponseComputerToolCall):
+                action_dict = item.action.model_dump() if item.action else {}
                 safety_checks = [
                     {"id": c.id, "code": c.code, "message": c.message}
-                    for c in item.pending_safety_checks  # type: ignore[union-attr]
+                    for c in item.pending_safety_checks
                 ]
                 result.computer_use_results.append(
                     ComputerUseResult(
                         id=item.id,
-                        status=item.status,  # type: ignore[union-attr]
-                        type=item_type,
-                        call_id=item.call_id,  # type: ignore[union-attr]
+                        status=item.status,
+                        type=item.type,
+                        call_id=item.call_id,
                         action=action_dict,
                         pending_safety_checks=safety_checks,
                     )
                 )
 
-            elif item_type == "reasoning":
-                summaries = [{"type": s.type, "text": s.text} for s in item.summary]  # type: ignore[union-attr]
+            elif isinstance(item, ResponseReasoningItem):
+                summaries = [{"type": s.type, "text": s.text} for s in item.summary]
                 result.reasoning_summaries.append(
                     ReasoningSummary(
                         id=item.id,
-                        status=item.status,  # type: ignore[union-attr]
-                        type=item_type,
+                        status=item.status,
+                        type=item.type,
                         summary=summaries,
-                        encrypted_content=item.encrypted_content,  # type: ignore[union-attr]
+                        encrypted_content=item.encrypted_content,
                     )
                 )
 
-            elif item_type == "function_call":
+            elif isinstance(item, ResponseFunctionToolCall):
                 result.function_calls.append(
                     {
-                        "id": item.call_id,  # type: ignore[union-attr]
-                        "name": item.name,  # type: ignore[union-attr]
-                        "arguments": item.arguments,  # type: ignore[union-attr]
+                        "id": item.call_id,
+                        "name": item.name,
+                        "arguments": item.arguments,
                     }
                 )
 
@@ -1552,11 +1570,6 @@ class OpenAICompletion(BaseLLM):
         self, tools: list[dict[str, BaseTool]]
     ) -> list[dict[str, Any]]:
         """Convert CrewAI tool format to OpenAI function calling format."""
-        from crewai.llms.providers.utils.common import safe_tool_conversion
-        from crewai.utilities.pydantic_schema_utils import (
-            force_additional_properties_false,
-        )
-
         openai_tools = []
 
         for tool in tools:
@@ -1575,8 +1588,9 @@ class OpenAICompletion(BaseLLM):
                 params_dict = (
                     parameters if isinstance(parameters, dict) else dict(parameters)
                 )
-                params_dict = force_additional_properties_false(params_dict)
-                openai_tool["function"]["parameters"] = params_dict
+                openai_tool["function"]["parameters"] = (
+                    sanitize_tool_params_for_openai_strict(params_dict)
+                )
 
             openai_tools.append(openai_tool)
         return openai_tools
@@ -1595,7 +1609,7 @@ class OpenAICompletion(BaseLLM):
                 parse_params = {
                     k: v for k, v in params.items() if k != "response_format"
                 }
-                parsed_response = self.client.beta.chat.completions.parse(
+                parsed_response = self._get_sync_client().beta.chat.completions.parse(
                     **parse_params,
                     response_format=response_model,
                 )
@@ -1615,10 +1629,13 @@ class OpenAICompletion(BaseLLM):
                         from_task=from_task,
                         from_agent=from_agent,
                         messages=params["messages"],
+                        usage=usage,
                     )
                     return parsed_object
 
-            response: ChatCompletion = self.client.chat.completions.create(**params)
+            response: ChatCompletion = self._get_sync_client().chat.completions.create(
+                **params
+            )
 
             usage = self._extract_openai_token_usage(response)
 
@@ -1636,12 +1653,15 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params["messages"],
+                    usage=usage,
                 )
                 return list(message.tool_calls)
 
             # If there are tool_calls and available_functions, execute the tools
             if message.tool_calls and available_functions:
                 tool_call = message.tool_calls[0]
+                if not isinstance(tool_call, ChatCompletionMessageFunctionToolCall):
+                    return message.content
                 function_name = tool_call.function.name
 
                 try:
@@ -1674,6 +1694,7 @@ class OpenAICompletion(BaseLLM):
                         from_task=from_task,
                         from_agent=from_agent,
                         messages=params["messages"],
+                        usage=usage,
                     )
                     return structured_result
                 except ValueError as e:
@@ -1687,6 +1708,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params["messages"],
+                usage=usage,
             )
 
             if usage.get("total_tokens", 0) > 0:
@@ -1728,7 +1750,7 @@ class OpenAICompletion(BaseLLM):
         self,
         full_response: str,
         tool_calls: dict[int, dict[str, Any]],
-        usage_data: dict[str, int],
+        usage_data: dict[str, Any] | None,
         params: dict[str, Any],
         available_functions: dict[str, Any] | None = None,
         from_task: Any | None = None,
@@ -1739,7 +1761,7 @@ class OpenAICompletion(BaseLLM):
         Args:
             full_response: The accumulated text response from the stream.
             tool_calls: Accumulated tool calls from the stream, keyed by index.
-            usage_data: Token usage data from the stream.
+            usage_data: Token usage data from the stream, or None if unavailable.
             params: The completion parameters containing messages.
             available_functions: Available functions for tool calling.
             from_task: Task that initiated the call.
@@ -1750,7 +1772,8 @@ class OpenAICompletion(BaseLLM):
             tool execution result when available_functions is provided,
             or the text response string.
         """
-        self._track_token_usage_internal(usage_data)
+        if usage_data:
+            self._track_token_usage_internal(usage_data)
 
         if tool_calls and not available_functions:
             tool_calls_list = [
@@ -1771,6 +1794,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params["messages"],
+                usage=usage_data,
             )
             return tool_calls_list
 
@@ -1813,6 +1837,7 @@ class OpenAICompletion(BaseLLM):
             from_task=from_task,
             from_agent=from_agent,
             messages=params["messages"],
+            usage=usage_data,
         )
 
         return full_response
@@ -1837,7 +1862,7 @@ class OpenAICompletion(BaseLLM):
             }
 
             stream: ChatCompletionStream[BaseModel]
-            with self.client.beta.chat.completions.stream(
+            with self._get_sync_client().beta.chat.completions.stream(
                 **parse_params, response_format=response_model
             ) as stream:
                 for chunk in stream:
@@ -1866,6 +1891,7 @@ class OpenAICompletion(BaseLLM):
                                 from_task=from_task,
                                 from_agent=from_agent,
                                 messages=params["messages"],
+                                usage=usage,
                             )
                             return parsed_result
 
@@ -1873,10 +1899,10 @@ class OpenAICompletion(BaseLLM):
             return ""
 
         completion_stream: Stream[ChatCompletionChunk] = (
-            self.client.chat.completions.create(**params)
+            self._get_sync_client().chat.completions.create(**params)
         )
 
-        usage_data = {"total_tokens": 0}
+        usage_data: dict[str, Any] | None = None
 
         for completion_chunk in completion_stream:
             response_id_stream = (
@@ -1970,9 +1996,11 @@ class OpenAICompletion(BaseLLM):
                 parse_params = {
                     k: v for k, v in params.items() if k != "response_format"
                 }
-                parsed_response = await self.async_client.beta.chat.completions.parse(
-                    **parse_params,
-                    response_format=response_model,
+                parsed_response = (
+                    await self._get_async_client().beta.chat.completions.parse(
+                        **parse_params,
+                        response_format=response_model,
+                    )
                 )
                 math_reasoning = parsed_response.choices[0].message
 
@@ -1990,11 +2018,12 @@ class OpenAICompletion(BaseLLM):
                         from_task=from_task,
                         from_agent=from_agent,
                         messages=params["messages"],
+                        usage=usage,
                     )
                     return parsed_object
 
-            response: ChatCompletion = await self.async_client.chat.completions.create(
-                **params
+            response: ChatCompletion = (
+                await self._get_async_client().chat.completions.create(**params)
             )
 
             usage = self._extract_openai_token_usage(response)
@@ -2013,12 +2042,19 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params["messages"],
+                    usage=usage,
                 )
                 return list(message.tool_calls)
 
             # If there are tool_calls and available_functions, execute the tools
             if message.tool_calls and available_functions:
+                from openai.types.chat.chat_completion_message_function_tool_call import (
+                    ChatCompletionMessageFunctionToolCall,
+                )
+
                 tool_call = message.tool_calls[0]
+                if not isinstance(tool_call, ChatCompletionMessageFunctionToolCall):
+                    return message.content
                 function_name = tool_call.function.name
 
                 try:
@@ -2051,6 +2087,7 @@ class OpenAICompletion(BaseLLM):
                         from_task=from_task,
                         from_agent=from_agent,
                         messages=params["messages"],
+                        usage=usage,
                     )
                     return structured_result
                 except ValueError as e:
@@ -2064,6 +2101,7 @@ class OpenAICompletion(BaseLLM):
                 from_task=from_task,
                 from_agent=from_agent,
                 messages=params["messages"],
+                usage=usage,
             )
 
             if usage.get("total_tokens", 0) > 0:
@@ -2111,10 +2149,10 @@ class OpenAICompletion(BaseLLM):
         if response_model:
             completion_stream: AsyncIterator[
                 ChatCompletionChunk
-            ] = await self.async_client.chat.completions.create(**params)
+            ] = await self._get_async_client().chat.completions.create(**params)
 
             accumulated_content = ""
-            usage_data = {"total_tokens": 0}
+            usage_data: dict[str, Any] | None = None
             async for chunk in completion_stream:
                 response_id_stream = chunk.id if hasattr(chunk, "id") else None
 
@@ -2137,7 +2175,8 @@ class OpenAICompletion(BaseLLM):
                         response_id=response_id_stream,
                     )
 
-            self._track_token_usage_internal(usage_data)
+            if usage_data:
+                self._track_token_usage_internal(usage_data)
 
             try:
                 parsed_object = response_model.model_validate_json(accumulated_content)
@@ -2148,6 +2187,7 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params["messages"],
+                    usage=usage_data,
                 )
 
                 return parsed_object
@@ -2159,14 +2199,15 @@ class OpenAICompletion(BaseLLM):
                     from_task=from_task,
                     from_agent=from_agent,
                     messages=params["messages"],
+                    usage=usage_data,
                 )
                 return accumulated_content
 
         stream: AsyncIterator[
             ChatCompletionChunk
-        ] = await self.async_client.chat.completions.create(**params)
+        ] = await self._get_async_client().chat.completions.create(**params)
 
-        usage_data = {"total_tokens": 0}
+        usage_data = None
 
         async for chunk in stream:
             response_id_stream = chunk.id if hasattr(chunk, "id") else None
@@ -2245,6 +2286,9 @@ class OpenAICompletion(BaseLLM):
 
     def supports_stop_words(self) -> bool:
         """Check if the model supports stop words."""
+        model_lower = self.model.lower() if self.model else ""
+        if "gpt-5" in model_lower:
+            return False
         return not self.is_o1_model
 
     def get_context_window_size(self) -> int:
@@ -2289,19 +2333,23 @@ class OpenAICompletion(BaseLLM):
     def _extract_openai_token_usage(
         self, response: ChatCompletion | ChatCompletionChunk
     ) -> dict[str, Any]:
-        """Extract token usage from OpenAI ChatCompletion or ChatCompletionChunk response."""
+        """Extract token usage and response metadata from OpenAI ChatCompletion."""
         if hasattr(response, "usage") and response.usage:
             usage = response.usage
-            result = {
+            result: dict[str, Any] = {
                 "prompt_tokens": getattr(usage, "prompt_tokens", 0),
                 "completion_tokens": getattr(usage, "completion_tokens", 0),
                 "total_tokens": getattr(usage, "total_tokens", 0),
             }
-            # Extract cached prompt tokens from prompt_tokens_details
             prompt_details = getattr(usage, "prompt_tokens_details", None)
             if prompt_details:
                 result["cached_prompt_tokens"] = (
                     getattr(prompt_details, "cached_tokens", 0) or 0
+                )
+            completion_details = getattr(usage, "completion_tokens_details", None)
+            if completion_details:
+                result["reasoning_tokens"] = (
+                    getattr(completion_details, "reasoning_tokens", 0) or 0
                 )
             return result
         return {"total_tokens": 0}
@@ -2353,8 +2401,8 @@ class OpenAICompletion(BaseLLM):
             from crewai_files.uploaders.openai import OpenAIFileUploader
 
             return OpenAIFileUploader(
-                client=self.client,
-                async_client=self.async_client,
+                client=self._get_sync_client(),
+                async_client=self._get_async_client(),
             )
         except ImportError:
             return None

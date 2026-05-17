@@ -2,24 +2,33 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from crewai.utilities.i18n import I18N, get_i18n
+from crewai.utilities.i18n import I18N_DEFAULT
 
 
-class StandardPromptResult(TypedDict):
+class StandardPromptResult(BaseModel):
     """Result with only prompt field for standard mode."""
 
-    prompt: Annotated[str, "The generated prompt string"]
+    prompt: str = Field(default="")
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __contains__(self, key: str) -> bool:
+        return hasattr(self, key) and getattr(self, key) is not None
 
 
 class SystemPromptResult(StandardPromptResult):
     """Result with system, user, and prompt fields for system prompt mode."""
 
-    system: Annotated[str, "The system prompt component"]
-    user: Annotated[str, "The user prompt component"]
+    system: str = Field(default="")
+    user: str = Field(default="")
 
 
 COMPONENTS = Literal[
@@ -40,7 +49,6 @@ class Prompts(BaseModel):
         - Need to refactor so that prompt is not tightly coupled to agent.
     """
 
-    i18n: I18N = Field(default_factory=get_i18n)
     has_tools: bool = Field(
         default=False, description="Indicates if the agent has access to tools"
     )
@@ -78,7 +86,7 @@ class Prompts(BaseModel):
                 slices.append("tools")
         else:
             slices.append("no_tools")
-        system: str = self._build_prompt(slices)
+        system: str = self._build_prompt(slices) + self._build_skill_block()
 
         # Determine which task slice to use:
         task_slice: COMPONENTS
@@ -98,7 +106,7 @@ class Prompts(BaseModel):
             return SystemPromptResult(
                 system=system,
                 user=self._build_prompt([task_slice]),
-                prompt=self._build_prompt(slices),
+                prompt=self._build_prompt(slices) + self._build_skill_block(),
             )
         return StandardPromptResult(
             prompt=self._build_prompt(
@@ -107,7 +115,26 @@ class Prompts(BaseModel):
                 self.prompt_template,
                 self.response_template,
             )
+            + self._build_skill_block()
         )
+
+    def _build_skill_block(self) -> str:
+        """Render the agent's activated skills as a stable XML block.
+
+        Skills are agent-scoped (do not change per task), so they live in the
+        system prompt where prompt-cache prefixes can survive across calls.
+        """
+        skills = getattr(self.agent, "skills", None)
+        if not skills:
+            return ""
+
+        from crewai.skills.loader import format_skill_context
+        from crewai.skills.models import Skill
+
+        sections = [format_skill_context(s) for s in skills if isinstance(s, Skill)]
+        if not sections:
+            return ""
+        return "\n\n<skills>\n" + "\n\n".join(sections) + "\n</skills>"
 
     def _build_prompt(
         self,
@@ -131,13 +158,13 @@ class Prompts(BaseModel):
         if not system_template or not prompt_template:
             # If any of the required templates are missing, fall back to the default format
             prompt_parts: list[str] = [
-                self.i18n.slice(component) for component in components
+                I18N_DEFAULT.slice(component) for component in components
             ]
             prompt = "".join(prompt_parts)
         else:
             # All templates are provided, use them
             template_parts: list[str] = [
-                self.i18n.slice(component)
+                I18N_DEFAULT.slice(component)
                 for component in components
                 if component != "task"
             ]
@@ -145,7 +172,7 @@ class Prompts(BaseModel):
                 "{{ .System }}", "".join(template_parts)
             )
             prompt = prompt_template.replace(
-                "{{ .Prompt }}", "".join(self.i18n.slice("task"))
+                "{{ .Prompt }}", "".join(I18N_DEFAULT.slice("task"))
             )
             # Handle missing response_template
             if response_template:

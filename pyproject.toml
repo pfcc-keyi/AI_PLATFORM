@@ -5,6 +5,8 @@ requires-python = ">=3.10"
 dependencies = [
     "crewai",
     "crewai-tools",
+    "crewai-core",
+    "crewai-cli",
     "fastapi>=0.115",
     "uvicorn>=0.34",
     "httpx>=0.28",
@@ -12,9 +14,17 @@ dependencies = [
     "pydantic>=2.0",
 ]
 
+[tool.uv]
+override-dependencies = [
+    "onnxruntime<1.24",
+]
+
 [tool.uv.sources]
 crewai = { path = "source/crewai", editable = true }
 crewai-tools = { path = "source/crewai-tools", editable = true }
+crewai-core = { path = "source/crewai-core", editable = true }
+crewai-cli = { path = "source/cli", editable = true }
+crewai-files = { path = "source/crewai-files", editable = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["models"]
