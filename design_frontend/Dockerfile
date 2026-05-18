@@ -12,6 +12,7 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN (npm install --include=dev --no-audit --no-fund \
      || npm install --include=dev --no-audit --no-fund --legacy-peer-deps) \
+    && mkdir -p public \
     && npm run build
 
 FROM node:20-alpine AS runner
