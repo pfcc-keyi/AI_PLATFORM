@@ -48,36 +48,39 @@ export function UploadDropzone() {
   return (
     <div className="w-full">
       <motion.div
-        {...getRootProps()}
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: "easeOut" }}
-        className={cn(
-          "group cursor-pointer rounded-2xl border-2 border-dashed bg-surface/40 backdrop-blur-sm",
-          "p-12 text-center transition-colors",
-          isDragActive
-            ? "border-accent bg-accent/10"
-            : "border-border hover:border-accent/60 hover:bg-surface/60"
-        )}
       >
-        <input {...getInputProps()} />
-        <div className="mx-auto flex flex-col items-center gap-4">
-          {busy ? (
-            <Loader2 className="h-12 w-12 animate-spin text-accent" />
-          ) : (
-            <CloudUpload className="h-12 w-12 text-accent" />
+        <div
+          {...getRootProps()}
+          className={cn(
+            "group cursor-pointer rounded-2xl border-2 border-dashed bg-surface/40 backdrop-blur-sm",
+            "p-12 text-center transition-colors",
+            isDragActive
+              ? "border-accent bg-accent/10"
+              : "border-border hover:border-accent/60 hover:bg-surface/60"
           )}
-          <div className="text-lg font-medium">
-            {busy
-              ? "Uploading and parsing your schema..."
-              : isDragActive
-                ? "Drop your .xlsx here"
-                : "Drop an Excel schema dictionary"}
-          </div>
-          <div className="text-sm text-muted max-w-md">
-            Multi-sheet workbooks are supported. The AI cockpit parses tables,
-            clusters them by FK graph, asks clarifying questions, then renders
-            a 3D ERD with per-table state machines.
+        >
+          <input {...getInputProps()} />
+          <div className="mx-auto flex flex-col items-center gap-4">
+            {busy ? (
+              <Loader2 className="h-12 w-12 animate-spin text-accent" />
+            ) : (
+              <CloudUpload className="h-12 w-12 text-accent" />
+            )}
+            <div className="text-lg font-medium">
+              {busy
+                ? "Uploading and parsing your schema..."
+                : isDragActive
+                  ? "Drop your .xlsx here"
+                  : "Drop an Excel schema dictionary"}
+            </div>
+            <div className="text-sm text-muted max-w-md">
+              Multi-sheet workbooks are supported. The AI cockpit parses tables,
+              clusters them by FK graph, asks clarifying questions, then renders
+              a 3D ERD with per-table state machines.
+            </div>
           </div>
         </div>
       </motion.div>

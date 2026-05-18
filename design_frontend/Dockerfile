@@ -2,14 +2,17 @@ FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package.json ./
 COPY package-lock.json* ./
-RUN npm install --omit=dev || npm install
+RUN npm install --omit=dev --no-audit --no-fund \
+    || npm install --omit=dev --no-audit --no-fund --legacy-peer-deps
 
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm install --include=dev && npm run build
+RUN (npm install --include=dev --no-audit --no-fund \
+     || npm install --include=dev --no-audit --no-fund --legacy-peer-deps) \
+    && npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
