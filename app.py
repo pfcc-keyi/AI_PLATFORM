@@ -4,6 +4,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.config import router as config_router
+from api.routes.design import (
+    register_design_listeners,
+    router as design_router,
+)
 from api.routes.ops import router as ops_router
 from api.routes.health import router as health_router
 from setup.knowledge_setup import load_knowledge_sources
@@ -14,6 +18,7 @@ from setup.schema_sync import sync_schema_catalog
 async def lifespan(application: FastAPI):
     await sync_schema_catalog()
     load_knowledge_sources()
+    register_design_listeners()
     yield
 
 
@@ -30,3 +35,4 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(config_router, prefix="/api/config", tags=["config"])
 app.include_router(ops_router, prefix="/api/ops", tags=["ops"])
+app.include_router(design_router, prefix="/api/design", tags=["design"])

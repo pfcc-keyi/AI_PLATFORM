@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: 11 13 20;
+  --surface: 18 22 33;
+  --surface-alt: 25 30 45;
+  --text: 232 234 240;
+  --muted: 148 156 178;
+  --border: 38 45 65;
+  --accent: 168 119 255;
+  --accent-alt: 79 209 255;
+  --success: 92 218 162;
+  --warning: 252 196 110;
+  --danger: 246 96 122;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+html,
+body {
+  background:
+    radial-gradient(1200px circle at 20% -10%, rgb(168 119 255 / 0.12), transparent 60%),
+    radial-gradient(900px circle at 110% 10%, rgb(79 209 255 / 0.1), transparent 60%),
+    rgb(var(--bg));
+  color: rgb(var(--text));
+  font-family: var(--font-sans);
+  min-height: 100vh;
+}
+
+* {
+  border-color: rgb(var(--border));
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--border));
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--muted) / 0.6);
+}
+
+/* react-flow custom theme */
+.react-flow {
+  background: transparent !important;
+}
+
+.react-flow__node {
+  background: rgb(var(--surface));
+  border: 1px solid rgb(var(--border));
+  border-radius: 12px;
+  padding: 10px 16px;
+  color: rgb(var(--text));
+  font-family: var(--font-sans);
+  font-size: 13px;
+  box-shadow: 0 6px 20px -8px rgba(0, 0, 0, 0.6);
+}
+
+.react-flow__edge-path {
+  stroke: rgb(var(--accent));
+  stroke-width: 1.5;
+}
+
+.react-flow__edge-text {
+  fill: rgb(var(--text));
+  font-size: 11px;
+}
+
+.react-flow__controls {
+  background: rgb(var(--surface));
+  border: 1px solid rgb(var(--border));
+  border-radius: 8px;
+}
+
+.react-flow__controls button {
+  background: rgb(var(--surface)) !important;
+  color: rgb(var(--text)) !important;
+  border-bottom: 1px solid rgb(var(--border)) !important;
+}

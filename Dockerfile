@@ -19,10 +19,13 @@ COPY api/ api/
 COPY setup/ setup/
 COPY knowledge/ knowledge/
 COPY models/ models/
+COPY storage/ storage/
+COPY skills/ skills/
 
 RUN chmod +x entrypoint.sh
 
 ENV CREWAI_STORAGE_DIR=/data/crewai
+ENV DESIGN_STORAGE_DIR=/data/designs
 
 EXPOSE 8000
 ENTRYPOINT ["./entrypoint.sh"]

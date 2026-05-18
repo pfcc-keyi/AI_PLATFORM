@@ -12,6 +12,10 @@ dependencies = [
     "httpx>=0.28",
     "python-dotenv>=1.0",
     "pydantic>=2.0",
+    "python-multipart>=0.0.9",
+    "openpyxl>=3.1",
+    "networkx>=3.2",
+    "python-louvain>=0.16",
 ]
 
 [tool.uv]

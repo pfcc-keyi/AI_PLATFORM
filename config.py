@@ -77,6 +77,11 @@ OPENAI_MODEL = LLM(
 CREWAI_STORAGE_DIR = os.environ.get("CREWAI_STORAGE_DIR", "./.crewai_storage")
 MEMORY_STORAGE_PATH = os.path.join(CREWAI_STORAGE_DIR, "memory")
 
+# Schema Design Cockpit persistence root. Mount a Railway volume here in
+# production to keep designs across redeploys; otherwise designs only survive
+# within the running container.
+DESIGN_STORAGE_DIR = os.environ.get("DESIGN_STORAGE_DIR", "/data/designs")
+
 # ---------------------------------------------------------------------------
 # Embedder -- single source of truth for Memory, Knowledge, and all Crews.
 #
