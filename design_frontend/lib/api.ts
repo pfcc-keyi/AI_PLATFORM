@@ -6,7 +6,11 @@ import type {
   DesignCritique
 } from "./types";
 
-const API_BASE = (process.env.NEXT_PUBLIC_AI_API_URL || "").replace(/\/$/, "");
+export const API_BASE = (process.env.NEXT_PUBLIC_AI_API_URL || "").replace(
+  /\/$/,
+  ""
+);
+export const API_BASE_CONFIGURED = API_BASE.length > 0;
 
 function url(path: string) {
   return `${API_BASE}${path}`;
@@ -22,7 +26,10 @@ async function jsonOr<T>(res: Response): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(`${res.status}: ${msg}`);
+    const hint = !API_BASE_CONFIGURED
+      ? " (NEXT_PUBLIC_AI_API_URL is empty — set it on the frontend service and redeploy)"
+      : "";
+    throw new Error(`${res.status} ${msg} at ${res.url}${hint}`);
   }
   return (text ? JSON.parse(text) : {}) as T;
 }
