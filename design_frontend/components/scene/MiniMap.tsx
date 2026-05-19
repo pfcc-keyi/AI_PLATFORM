@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Map as MapIcon, X } from "lucide-react";
+import { Map as MapIcon, Minimize2, Maximize2 } from "lucide-react";
 import type { ERDLayout } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -13,12 +13,13 @@ interface MiniMapProps {
 }
 
 /**
- * Compact, collapsible top-down minimap.
+ * Top-down minimap that lives in the bottom of the left rail and stretches
+ * to the rail's width. Uses an SVG viewBox so the dots scale cleanly
+ * regardless of container width.
  *
  * - Click a dot to focus that table in the 3D scene.
- * - Header (with chip-count + cluster filter readout) is always visible.
- * - Click the chevron / icon button to collapse to a single icon button.
- * - Persists collapsed state in localStorage.
+ * - Toggle the maximize/minimize button to expand vertically.
+ * - Persists open + height preset to localStorage.
  */
 export function MiniMap({
   layout,
@@ -26,14 +27,19 @@ export function MiniMap({
   focusedCluster,
   onPickTable
 }: MiniMapProps) {
-  const size = 132;
-  const padding = 6;
+  const padding = 12;
+  const VB_W = 200;
+  // VB_H is computed from data range below so the dots aren't squashed.
+
   const [open, setOpen] = React.useState<boolean>(true);
+  const [tall, setTall] = React.useState<boolean>(false);
 
   React.useEffect(() => {
     try {
-      const stored = window.localStorage.getItem("minimap_open");
-      if (stored !== null) setOpen(stored === "1");
+      const o = window.localStorage.getItem("minimap_open");
+      if (o !== null) setOpen(o === "1");
+      const t = window.localStorage.getItem("minimap_tall");
+      if (t !== null) setTall(t === "1");
     } catch {
       /* ignore */
     }
@@ -42,10 +48,11 @@ export function MiniMap({
   React.useEffect(() => {
     try {
       window.localStorage.setItem("minimap_open", open ? "1" : "0");
+      window.localStorage.setItem("minimap_tall", tall ? "1" : "0");
     } catch {
       /* ignore */
     }
-  }, [open]);
+  }, [open, tall]);
 
   const { minX, maxX, minZ, maxZ } = React.useMemo(() => {
     let minX = Infinity,
@@ -70,65 +77,78 @@ export function MiniMap({
   const rangeX = Math.max(maxX - minX, 1);
   const rangeZ = Math.max(maxZ - minZ, 1);
 
-  function toPx(x: number, z: number) {
-    const px = padding + ((x - minX) / rangeX) * (size - padding * 2);
-    const pz = padding + ((z - minZ) / rangeZ) * (size - padding * 2);
+  // Make viewBox aspect match the actual data range so dots aren't squashed
+  // when the rail is wider than tall (the common case). Clamp the height so
+  // the minimap can't dominate the rail.
+  const dataAspect = rangeX / rangeZ;
+  const compactAspect = Math.min(Math.max(dataAspect, 1.2), 2.2);
+  const tallAspect = Math.min(Math.max(dataAspect, 0.9), 1.4);
+  const aspect = tall ? tallAspect : compactAspect;
+  const VB_H = Math.round(VB_W / aspect);
+
+  function toVB(x: number, z: number) {
+    const px = padding + ((x - minX) / rangeX) * (VB_W - padding * 2);
+    const pz = padding + ((z - minZ) / rangeZ) * (VB_H - padding * 2);
     return [px, pz];
   }
 
+  const tableCount = layout.tables.length;
+
+  // Collapsed: render a thin inline button that still fits the rail width.
   if (!open) {
     return (
       <button
         onClick={() => setOpen(true)}
         className={cn(
-          "pointer-events-auto inline-flex h-9 w-9 items-center justify-center",
-          "rounded-full border border-border bg-surface/85 text-muted",
-          "backdrop-blur transition hover:bg-surfaceAlt hover:text-text"
+          "pointer-events-auto flex w-full items-center justify-center gap-1.5",
+          "rounded-md border border-border bg-bg/40 px-2 py-1.5 text-[11px] text-muted",
+          "hover:bg-surfaceAlt hover:text-text"
         )}
         title="Show map"
       >
-        <MapIcon className="h-4 w-4" />
+        <MapIcon className="h-3 w-3" />
+        Show map · {tableCount}
       </button>
     );
   }
 
-  const tableCount = layout.tables.length;
-
   return (
-    <div
-      className="pointer-events-auto rounded-xl border border-border bg-surface/85 p-2 backdrop-blur"
-      style={{ width: size + 16 }}
-    >
-      <div className="mb-1 flex items-center justify-between gap-1 px-1">
-        <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-muted">
-          <MapIcon className="h-3 w-3" />
-          Map · {tableCount}
+    <div className="pointer-events-auto flex w-full flex-col gap-1 rounded-md border border-border/60 bg-bg/30 p-2">
+      <div className="flex items-center justify-between px-0.5">
+        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.14em] text-muted">
+          <MapIcon className="h-3 w-3 text-accent" />
+          Map · {tableCount} tables
         </div>
-        <button
-          onClick={() => setOpen(false)}
-          className="flex h-4 w-4 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
-          title="Hide map"
-        >
-          <X className="h-3 w-3" />
-        </button>
+        <div className="flex items-center gap-0.5">
+          <button
+            onClick={() => setTall((t) => !t)}
+            className="flex h-5 w-5 items-center justify-center rounded text-muted hover:bg-surfaceAlt hover:text-text"
+            title={tall ? "Shrink map" : "Enlarge map"}
+          >
+            {tall ? (
+              <Minimize2 className="h-3 w-3" />
+            ) : (
+              <Maximize2 className="h-3 w-3" />
+            )}
+          </button>
+          <button
+            onClick={() => setOpen(false)}
+            className="flex h-5 w-5 items-center justify-center rounded text-muted hover:bg-surfaceAlt hover:text-text"
+            title="Hide map"
+          >
+            <span className="text-[14px] leading-none">×</span>
+          </button>
+        </div>
       </div>
       <svg
-        width={size}
-        height={size}
-        className="block"
-        style={{ touchAction: "none" }}
+        viewBox={`0 0 ${VB_W} ${VB_H}`}
+        width="100%"
+        preserveAspectRatio="xMidYMid meet"
+        className="block rounded"
+        style={{ touchAction: "none", background: "rgb(11 13 20 / 0.6)" }}
       >
-        <rect
-          x={0}
-          y={0}
-          width={size}
-          height={size}
-          rx={6}
-          fill="rgb(11 13 20 / 0.65)"
-          stroke="rgb(38 45 65)"
-        />
         {layout.tables.map((t) => {
-          const [cx, cy] = toPx(t.x, t.z);
+          const [cx, cy] = toVB(t.x, t.z);
           const dimmed =
             focusedCluster &&
             t.cluster_id &&
@@ -140,7 +160,10 @@ export function MiniMap({
               role="button"
               aria-label={`Focus camera on ${t.table_name}`}
               tabIndex={0}
-              style={{ cursor: onPickTable ? "pointer" : "default", outline: "none" }}
+              style={{
+                cursor: onPickTable ? "pointer" : "default",
+                outline: "none"
+              }}
               onClick={() => onPickTable?.(t.table_name)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
@@ -151,12 +174,11 @@ export function MiniMap({
               data-table={t.table_name}
               data-testid={`map-dot-${t.table_name}`}
             >
-              {/* Invisible large hit area so users (and automation) can
-                  reliably click dots that would otherwise be 2-3 px wide. */}
+              {/* Invisible large hit area in viewBox units */}
               <circle
                 cx={cx}
                 cy={cy}
-                r={8}
+                r={9}
                 fill="transparent"
                 style={{ pointerEvents: "all" }}
               />
@@ -164,17 +186,17 @@ export function MiniMap({
                 <circle
                   cx={cx}
                   cy={cy}
-                  r={5}
+                  r={6}
                   fill="rgb(168 119 255 / 0.25)"
                   stroke="rgb(168 119 255)"
-                  strokeWidth={1}
+                  strokeWidth={1.5}
                   style={{ pointerEvents: "none" }}
                 />
               ) : null}
               <circle
                 cx={cx}
                 cy={cy}
-                r={isSelected ? 2.8 : 2}
+                r={isSelected ? 3.5 : 2.6}
                 fill={
                   isSelected
                     ? "rgb(168 119 255)"

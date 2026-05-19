@@ -34,6 +34,18 @@ export function DesignChat({ designId }: DesignChatProps) {
 
   const upsertPending = useDesignStore((s) => s.upsertPendingRevision);
   const selection = useDesignStore((s) => s.selection);
+  const pendingChatPrompt = useDesignStore((s) => s.pendingChatPrompt);
+  const setPendingChatPrompt = useDesignStore((s) => s.setPendingChatPrompt);
+
+  // External code (e.g. a critique question card) can hand us a prefilled
+  // prompt by writing to the store. Open ourselves, swap the input, then
+  // clear the store slot so we don't re-pop on every render.
+  React.useEffect(() => {
+    if (!pendingChatPrompt) return;
+    setOpen(true);
+    setInput(pendingChatPrompt);
+    setPendingChatPrompt(undefined);
+  }, [pendingChatPrompt, setPendingChatPrompt]);
 
   async function send() {
     const text = input.trim();

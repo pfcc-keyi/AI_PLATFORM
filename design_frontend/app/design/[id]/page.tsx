@@ -46,6 +46,7 @@ import { ClarificationCard } from "@/components/panels/ClarificationCard";
 import { DesignChat } from "@/components/chat/DesignChat";
 import { MiniMap } from "@/components/scene/MiniMap";
 import { ResizableRail } from "@/components/panels/ResizableRail";
+import { AboutCockpit } from "@/components/panels/AboutCockpit";
 
 const Scene3D = dynamic(
   () => import("@/components/scene/Scene3D").then((m) => m.Scene3D),
@@ -398,6 +399,7 @@ function DesignPageInner({ designId }: { designId: string }) {
           <Button size="sm" variant="ghost" onClick={handleRecritique} title="Re-run critic">
             <RefreshCw className="h-4 w-4" />
           </Button>
+          <AboutCockpit />
           <Button size="sm" variant="ghost" onClick={handleDelete} title="Delete design">
             <Trash2 className="h-4 w-4" />
           </Button>
@@ -446,10 +448,9 @@ function DesignPageInner({ designId }: { designId: string }) {
             </div>
             <div
               className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1"
-              // maxHeight gives the list a deterministic scrollable area even
-              // when the surrounding flex column can't compute heights from
-              // its own maxHeight (the rail uses max-height not height).
-              style={{ maxHeight: "calc(100vh - 6rem - 1rem - 220px)" }}
+              // Reserved for: rail max-height − (search + headings + minimap
+              // + paddings). Tweak if minimap height changes.
+              style={{ maxHeight: "calc(100vh - 6rem - 1rem - 180px)" }}
             >
               <button
                 className={cn(

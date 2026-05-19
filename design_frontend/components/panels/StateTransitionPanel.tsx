@@ -22,12 +22,32 @@ interface StateTransitionPanelProps {
  * glance. "init" / "deleted" are terminal pseudo-states; "approved" /
  * "active" feel like success; "rejected" / "void" feel like failure; anything
  * else is neutral accent. */
-function stateKind(s: string): "terminal" | "success" | "danger" | "warning" | "default" {
+function stateKind(
+  s: string
+): "terminal" | "success" | "danger" | "warning" | "default" {
   const l = s.toLowerCase();
   if (l === "init" || l === "deleted" || l === "void") return "terminal";
-  if (l.includes("approved") || l.includes("active") || l.includes("done") || l.includes("ready")) return "success";
-  if (l.includes("rejected") || l.includes("failed") || l.includes("error") || l.includes("cancel")) return "danger";
-  if (l.includes("pending") || l.includes("await") || l.includes("review") || l.includes("draft")) return "warning";
+  if (
+    l.includes("approved") ||
+    l.includes("active") ||
+    l.includes("done") ||
+    l.includes("ready")
+  )
+    return "success";
+  if (
+    l.includes("rejected") ||
+    l.includes("failed") ||
+    l.includes("error") ||
+    l.includes("cancel")
+  )
+    return "danger";
+  if (
+    l.includes("pending") ||
+    l.includes("await") ||
+    l.includes("review") ||
+    l.includes("draft")
+  )
+    return "warning";
   return "default";
 }
 
@@ -62,8 +82,16 @@ const STATE_PALETTE: Record<
   }
 };
 
-export function StateTransitionPanel({ table, height = 340 }: StateTransitionPanelProps) {
-  const { nodes, edges } = React.useMemo(() => {
+export function StateTransitionPanel({
+  table,
+  height = 340
+}: StateTransitionPanelProps) {
+  const [hoveredEdge, setHoveredEdge] = React.useState<string | null>(null);
+  const [pinnedEdge, setPinnedEdge] = React.useState<string | null>(null);
+
+  // Build a stable map: edge_id → list of action names. Doing this here
+  // lets the JSX below stay declarative about hover state.
+  const { nodes, baseEdges, actionsByEdge } = React.useMemo(() => {
     const allStates = new Set<string>(table.states ?? []);
     allStates.add("init");
     allStates.add("deleted");
@@ -73,7 +101,6 @@ export function StateTransitionPanel({ table, height = 340 }: StateTransitionPan
     });
     const ordered = Array.from(allStates);
 
-    // Layout: scale radius with state count so labels don't overlap.
     const n = Math.max(1, ordered.length);
     const radius = 90 + n * 14;
     const cx = 200;
@@ -91,8 +118,6 @@ export function StateTransitionPanel({ table, height = 340 }: StateTransitionPan
         data: { label: s },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
-        // We inline both background AND text colour so the global
-        // .react-flow__node CSS can't leave the label invisible.
         style: {
           borderRadius: 999,
           padding: "6px 14px",
@@ -114,24 +139,14 @@ export function StateTransitionPanel({ table, height = 340 }: StateTransitionPan
       actionByPair[key].push(a.name);
     });
 
-    // Detect cycles between A<->B so we can curve one direction differently
-    // and avoid edge labels stacking on top of each other.
-    const reverseExists = (from: string, to: string) =>
-      table.transitions.some(
-        (t) => t.from_state === to && t.to_state === from
-      );
-
-    const edges: Edge[] = table.transitions.map((t, i) => {
+    const baseEdges: Edge[] = table.transitions.map((t, i) => {
       const key = `${t.from_state}|${t.to_state}`;
-      const labels = actionByPair[key] || [];
-      const isSelfLoop = t.from_state === t.to_state;
-      const hasReverse = reverseExists(t.from_state, t.to_state);
+      const edgeId = `e${i}`;
       return {
-        id: `e${i}`,
+        id: edgeId,
         source: t.from_state,
         target: t.to_state,
-        label: labels.join(" / ") || undefined,
-        type: isSelfLoop ? "default" : hasReverse ? "default" : "smoothstep",
+        type: "smoothstep",
         animated: true,
         markerEnd: {
           type: MarkerType.ArrowClosed,
@@ -140,11 +155,41 @@ export function StateTransitionPanel({ table, height = 340 }: StateTransitionPan
           height: 18
         },
         style: {
-          stroke: "rgb(168 119 255 / 0.85)",
+          stroke: "rgb(168 119 255 / 0.75)",
           strokeWidth: 1.6
+        }
+      };
+    });
+
+    const actionsByEdge: Record<string, string[]> = {};
+    baseEdges.forEach((e, i) => {
+      const t = table.transitions[i];
+      const k = `${t.from_state}|${t.to_state}`;
+      actionsByEdge[e.id] = actionByPair[k] || [];
+    });
+
+    return { nodes, baseEdges, actionsByEdge };
+  }, [table]);
+
+  // Decorate base edges with hover/pinned state on each render. Only the
+  // hovered or pinned edge shows its action labels — the rest stay clean,
+  // which fixes the previous "long action names overlap with state pills"
+  // problem.
+  const edges: Edge[] = React.useMemo(() => {
+    return baseEdges.map((e) => {
+      const isActive = hoveredEdge === e.id || pinnedEdge === e.id;
+      const actions = actionsByEdge[e.id] || [];
+      const label = isActive && actions.length > 0 ? actions.join(" / ") : undefined;
+      return {
+        ...e,
+        label,
+        style: {
+          ...e.style,
+          stroke: isActive
+            ? "rgb(168 119 255)"
+            : "rgb(168 119 255 / 0.55)",
+          strokeWidth: isActive ? 2.4 : 1.4
         },
-        // !!! The crucial fix: label background was defaulting to white,
-        // making white-ish text invisible. Force both bg and text colour.
         labelStyle: {
           fill: "rgb(232 234 240)",
           fontSize: 11,
@@ -152,20 +197,21 @@ export function StateTransitionPanel({ table, height = 340 }: StateTransitionPan
         },
         labelBgStyle: {
           fill: "rgb(18 22 33)",
-          fillOpacity: 0.92,
-          stroke: "rgb(38 45 65)"
+          fillOpacity: 0.96,
+          stroke: "rgb(168 119 255 / 0.6)"
         },
-        labelBgPadding: [6, 4],
+        labelBgPadding: [8, 5] as [number, number],
         labelBgBorderRadius: 6
       };
     });
+  }, [baseEdges, actionsByEdge, hoveredEdge, pinnedEdge]);
 
-    return { nodes, edges };
-  }, [table]);
+  const activeId = pinnedEdge || hoveredEdge;
+  const activeActions = activeId ? actionsByEdge[activeId] || [] : [];
 
   return (
     <div
-      className="w-full overflow-hidden rounded-lg border border-border bg-bg/40"
+      className="relative w-full overflow-hidden rounded-lg border border-border bg-bg/40"
       style={{ height: typeof height === "number" ? `${height}px` : height }}
     >
       <ReactFlow
@@ -179,10 +225,40 @@ export function StateTransitionPanel({ table, height = 340 }: StateTransitionPan
         elementsSelectable={false}
         zoomOnScroll={false}
         panOnDrag
+        onEdgeMouseEnter={(_, edge) => setHoveredEdge(edge.id)}
+        onEdgeMouseLeave={() => setHoveredEdge(null)}
+        onEdgeClick={(_, edge) =>
+          setPinnedEdge((cur) => (cur === edge.id ? null : edge.id))
+        }
+        onPaneClick={() => setPinnedEdge(null)}
       >
         <Background gap={16} color="rgb(38 45 65)" />
         <Controls showInteractive={false} />
       </ReactFlow>
+
+      {/* Hint overlay — disappears as soon as the user starts interacting. */}
+      {!hoveredEdge && !pinnedEdge ? (
+        <div className="pointer-events-none absolute bottom-2 left-2 right-2 rounded-md bg-surface/85 px-2 py-1 text-[10px] text-muted backdrop-blur-sm">
+          Hover an arrow to see the action(s); click to pin.
+        </div>
+      ) : null}
+
+      {/* Pinned/hovered actions readout — full text outside the diagram
+          so long names can wrap without crowding the state pills. */}
+      {activeActions.length > 0 ? (
+        <div className="pointer-events-none absolute right-2 top-2 max-w-[60%] rounded-md border border-accent/40 bg-surface/95 px-2.5 py-1.5 text-[11px] shadow-glow backdrop-blur">
+          <div className="mb-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-muted">
+            {pinnedEdge ? "Pinned action(s)" : "Action(s)"}
+          </div>
+          <div className="flex flex-col gap-0.5 font-mono text-text">
+            {activeActions.map((a) => (
+              <span key={a} className="break-all">
+                {a}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

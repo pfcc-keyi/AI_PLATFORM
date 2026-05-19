@@ -23,6 +23,12 @@ interface DesignState {
   focusedCluster: string | undefined;
   questions: string[];
   clarificationRound: number;
+  /** When set, the chat panel pops open with this text pre-filled. Used so
+   *  any panel (open-questions, critique issues, etc.) can hand a follow-up
+   *  prompt to the refinement chat. Cleared after the chat picks it up. */
+  pendingChatPrompt: string | undefined;
+  /** User-dismissed open questions (local only). */
+  dismissedQuestions: Set<string>;
 
   setDesign: (design: FullDesign | undefined) => void;
   setDesignId: (id: string | undefined) => void;
@@ -32,6 +38,8 @@ interface DesignState {
   setClarificationRound: (n: number) => void;
   upsertPendingRevision: (rev: DesignRevision) => void;
   removePendingRevision: (revisionId: string) => void;
+  setPendingChatPrompt: (text: string | undefined) => void;
+  dismissQuestion: (q: string) => void;
   getTable: (name: string) => SchemaDesign | undefined;
 }
 
@@ -43,6 +51,8 @@ export const useDesignStore = create<DesignState>((set, get) => ({
   focusedCluster: undefined,
   questions: [],
   clarificationRound: 0,
+  pendingChatPrompt: undefined,
+  dismissedQuestions: new Set<string>(),
 
   setDesign: (design) => set({ design }),
   setDesignId: (designId) => set({ designId }),
@@ -63,6 +73,13 @@ export const useDesignStore = create<DesignState>((set, get) => ({
         (r) => r.revision_id !== revisionId
       )
     })),
+  setPendingChatPrompt: (text) => set({ pendingChatPrompt: text }),
+  dismissQuestion: (q) =>
+    set((state) => {
+      const next = new Set(state.dismissedQuestions);
+      next.add(q);
+      return { dismissedQuestions: next };
+    }),
   getTable: (name) =>
     get().design?.schema_designs.find((sd) => sd.table_name === name)
 }));
