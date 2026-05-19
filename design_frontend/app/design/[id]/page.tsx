@@ -8,7 +8,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   ChevronLeft,
-  Compass,
+  Cog,
   Crosshair,
   Layers3,
   Loader2,
@@ -39,7 +39,8 @@ import { fallbackLayout } from "@/lib/layout3d";
 import { cn } from "@/lib/utils";
 import { TableInspector } from "@/components/panels/TableInspector";
 import { FieldInspector } from "@/components/panels/FieldInspector";
-import { AIThinkingStream } from "@/components/panels/AIThinkingStream";
+import { ActivityPanel } from "@/components/panels/ActivityPanel";
+import { HandlersPanel } from "@/components/panels/HandlersPanel";
 import { AssumptionDrawer } from "@/components/panels/AssumptionDrawer";
 import { DesignDiffPanel } from "@/components/panels/DesignDiffPanel";
 import { ClarificationCard } from "@/components/panels/ClarificationCard";
@@ -47,6 +48,7 @@ import { DesignChat } from "@/components/chat/DesignChat";
 import { MiniMap } from "@/components/scene/MiniMap";
 import { ResizableRail } from "@/components/panels/ResizableRail";
 import { AboutCockpit } from "@/components/panels/AboutCockpit";
+import { ExportButton } from "@/components/panels/ExportButton";
 
 const Scene3D = dynamic(
   () => import("@/components/scene/Scene3D").then((m) => m.Scene3D),
@@ -63,11 +65,11 @@ const Scene3D = dynamic(
   }
 );
 
-type RailTab = "activity" | "domain" | "critique" | "revisions";
+type RailTab = "activity" | "handlers" | "critique" | "revisions";
 
 const RAIL_TABS: { id: RailTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: "activity", label: "Activity", icon: Activity },
-  { id: "domain", label: "Domain", icon: Compass },
+  { id: "handlers", label: "Handlers", icon: Cog },
   { id: "critique", label: "Critique", icon: TriangleAlert },
   { id: "revisions", label: "Revisions", icon: Sparkles }
 ];
@@ -186,16 +188,27 @@ function DesignPageInner({ designId }: { designId: string }) {
     return design.schema_designs.find((sd) => sd.table_name === selectedTableName);
   }, [design, selectedTableName]);
 
-  // Auto-switch right rail when interesting things happen.
+  // Auto-switch right rail when interesting things happen. While the AI is
+  // still running, keep the Activity tab open so the user sees the progress
+  // stepper and the domain analysis card. Once the design is ready, switch
+  // to Critique if there are issues to address; otherwise to Handlers so the
+  // user can immediately review the suggested business logic.
   React.useEffect(() => {
     if (selection.kind !== "none") return;
-    if (phase === "designing" || phase === "synthesizing" || phase === "analyzing" || phase === "parsing") {
+    if (
+      phase === "designing" ||
+      phase === "synthesizing" ||
+      phase === "analyzing" ||
+      phase === "parsing"
+    ) {
       setRightTab("activity");
     } else if (phase === "awaiting_review" || phase === "ready") {
       if (design?.critique && (design.critique.issues?.length ?? 0) > 0) {
         setRightTab("critique");
+      } else if ((design?.handler_sketches?.length ?? 0) > 0) {
+        setRightTab("handlers");
       } else {
-        setRightTab("domain");
+        setRightTab("activity");
       }
     }
   }, [phase, selection.kind, design]);
@@ -399,6 +412,7 @@ function DesignPageInner({ designId }: { designId: string }) {
           <Button size="sm" variant="ghost" onClick={handleRecritique} title="Re-run critic">
             <RefreshCw className="h-4 w-4" />
           </Button>
+          <ExportButton design={design} />
           <AboutCockpit />
           <Button size="sm" variant="ghost" onClick={handleDelete} title="Delete design">
             <Trash2 className="h-4 w-4" />
@@ -594,10 +608,12 @@ function DesignPageInner({ designId }: { designId: string }) {
                   table={selectedTable}
                   fieldName={selection.fieldName}
                   initialState={selection.stateName}
+                  design={design}
                 />
               ) : selectedTable ? (
                 <TableInspector
                   table={selectedTable}
+                  design={design}
                   onLocate={requestCameraFocus}
                   onSelectField={(fieldName) =>
                     setSelection({
@@ -620,9 +636,11 @@ function DesignPageInner({ designId }: { designId: string }) {
                 const badgeCount =
                   t.id === "critique"
                     ? design?.critique?.issues?.length ?? 0
-                    : t.id === "revisions"
-                      ? pendingRevisions.length
-                      : 0;
+                    : t.id === "handlers"
+                      ? design?.handler_sketches?.length ?? 0
+                      : t.id === "revisions"
+                        ? pendingRevisions.length
+                        : 0;
                 return (
                   <button
                     key={t.id}
@@ -654,22 +672,25 @@ function DesignPageInner({ designId }: { designId: string }) {
             </div>
             <div className="flex-1 overflow-y-auto">
               {rightTab === "activity" ? (
-                <div className="p-2">
-                  <AIThinkingStream />
+                <div className="p-3">
+                  <ActivityPanel
+                    phase={phase}
+                    domain={design?.domain_analysis}
+                  />
                 </div>
               ) : null}
-              {rightTab === "domain" ? (
+              {rightTab === "handlers" ? (
                 <div className="p-3">
-                  <AssumptionDrawer
-                    domain={design?.domain_analysis}
-                    critique={undefined}
+                  <HandlersPanel
+                    design={design}
+                    designId={designId}
+                    onPickTable={handlePickTableFromMap}
                   />
                 </div>
               ) : null}
               {rightTab === "critique" ? (
                 <div className="p-3">
                   <AssumptionDrawer
-                    domain={undefined}
                     critique={design?.critique ?? undefined}
                   />
                 </div>

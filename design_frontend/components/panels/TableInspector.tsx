@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import {
+  Cog,
   Crosshair,
   Database,
   KeyRound,
@@ -11,13 +12,16 @@ import {
   X
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import type { SchemaDesign } from "@/lib/types";
+import type { FullDesign, HandlerSketch, SchemaDesign } from "@/lib/types";
 import { StateTransitionPanel } from "./StateTransitionPanel";
+import { HandlerCard } from "./HandlersPanel";
 import { cn } from "@/lib/utils";
 
 interface TableInspectorProps {
   table: SchemaDesign;
+  /** Whole design — used to find handler sketches whose tables_used includes
+   *  this table, and surface them right in the inspector. */
+  design?: FullDesign | undefined;
   onSelectField: (fieldName: string) => void;
   /** Re-frame the 3D camera on this table (parent bumps focusToken). */
   onLocate?: () => void;
@@ -25,10 +29,29 @@ interface TableInspectorProps {
 
 export function TableInspector({
   table,
+  design,
   onSelectField,
   onLocate
 }: TableInspectorProps) {
   const [fsOpen, setFsOpen] = React.useState(false);
+
+  // Pick handlers whose primary table (or any tables_used) is this one.
+  const relatedHandlers: HandlerSketch[] = React.useMemo(() => {
+    if (!design?.handler_sketches?.length) return [];
+    return design.handler_sketches.filter((h) => {
+      if ((h.tables_used ?? []).includes(table.table_name)) return true;
+      // Also include handlers whose trigger states match a state of this
+      // table — even when tables_used is empty, this likely targets us.
+      if (
+        h.trigger_state &&
+        table.states.includes(h.trigger_state) &&
+        (h.tables_used ?? []).length === 0
+      ) {
+        return true;
+      }
+      return false;
+    });
+  }, [design?.handler_sketches, table.table_name, table.states]);
 
   return (
     <div className="flex flex-col gap-5 p-4">
@@ -87,9 +110,32 @@ export function TableInspector({
         <StateTransitionPanel table={table} />
         <div className="text-[10px] text-muted">
           {table.transitions.length} transition{table.transitions.length === 1 ? "" : "s"} ·
-          {" "}drag nodes to reposition · scroll-to-zoom disabled
+          {" "}click an arrow to pin its action label · drag nodes to nudge
         </div>
       </section>
+
+      {/* Suggested handlers for this table */}
+      {relatedHandlers.length > 0 ? (
+        <section className="flex flex-col gap-2">
+          <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <Cog className="h-3 w-3 text-accent" />
+            Suggested handlers · {relatedHandlers.length}
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {relatedHandlers.map((h, i) => (
+              <HandlerCard
+                key={`${h.handler_name}-${i}`}
+                handler={h}
+                embedded
+              />
+            ))}
+          </div>
+          <div className="text-[10px] text-muted">
+            Click any handler to expand its full steps and reasoning. Use the
+            Handlers tab for a global view.
+          </div>
+        </section>
+      ) : null}
 
       {/* Columns */}
       <section className="flex flex-col gap-2">
@@ -110,7 +156,7 @@ export function TableInspector({
                 key={c.name}
                 type="button"
                 onClick={() => onSelectField(c.name)}
-                aria-label={`Column ${c.name} – click for handler suggestions`}
+                aria-label={`Column ${c.name} – click to see what touches it`}
                 data-testid={`column-row-${c.name}`}
                 className={cn(
                   "grid w-full grid-cols-[1fr_auto_auto] gap-x-2 border-t border-border/70 px-2 py-1.5 text-left text-xs hover:bg-surfaceAlt/40 focus-visible:bg-surfaceAlt/60 focus-visible:outline-none",
@@ -136,7 +182,8 @@ export function TableInspector({
           })}
         </div>
         <div className="text-[10px] text-muted">
-          Tip: click any field row to ask the AI for handler suggestions.
+          Tip: click any field row to see which handlers/actions touch it,
+          per state.
         </div>
       </section>
 

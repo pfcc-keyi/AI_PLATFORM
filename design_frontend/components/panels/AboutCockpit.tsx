@@ -70,69 +70,66 @@ export function AboutCockpit() {
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <Block
                   icon={<Layers3 className="h-3.5 w-3.5 text-accent" />}
-                  title="Clusters & tables"
+                  title="Clusters & tables (left rail)"
                 >
                   The AI groups related tables into{" "}
                   <span className="text-text">business clusters</span>. Click
                   a cluster to focus the 3D camera; type in the search box to
-                  jump straight to a table.
+                  jump straight to a table. Map at the bottom of the rail
+                  highlights selection.
                 </Block>
 
                 <Block
                   icon={<Compass className="h-3.5 w-3.5 text-accent" />}
-                  title="Domain analysis"
+                  title="Activity tab"
                 >
-                  The AI&apos;s reading of the upload:{" "}
-                  <span className="text-text">guessed domain</span>,
-                  sub-domains, and{" "}
-                  <span className="text-text">assumptions</span> it made when
-                  filling in missing details.
-                </Block>
-
-                <Block
-                  icon={<TriangleAlert className="h-3.5 w-3.5 text-warning" />}
-                  title="Critique"
-                >
-                  A second AI pass that reviews the whole design and flags{" "}
-                  <span className="text-text">suspicious patterns</span>,
-                  missing pieces, or risky decisions. Each issue has an{" "}
-                  <em>Address with AI</em> button that turns it into a
-                  refinement.
-                </Block>
-
-                <Block
-                  icon={<HelpCircle className="h-3.5 w-3.5 text-accentAlt" />}
-                  title="Open questions"
-                >
-                  Things the AI couldn&apos;t decide on its own. They&apos;re
-                  not bugs — they&apos;re <em>decisions</em> waiting for you.
-                  Click <em>Discuss with AI</em> to talk through one, or{" "}
-                  <em>Dismiss</em> to hide it.
+                  Live <span className="text-text">pipeline stepper</span>{" "}
+                  showing which of the 7 design phases is running, plus the AI&apos;s{" "}
+                  <span className="text-text">domain analysis</span> — guessed
+                  domain, sub-domains, and assumptions.
                 </Block>
 
                 <Block
                   icon={<Cog className="h-3.5 w-3.5 text-accent" />}
-                  title="Handlers"
+                  title="Handlers tab"
                 >
-                  Per-field business logic the AI proposes (e.g.{" "}
-                  <code className="font-mono text-[10px] text-accent">
-                    approve_transaction
-                  </code>
-                  ). They&apos;re sketches with{" "}
-                  <span className="text-text">what / why / how</span> — not
-                  executable yet, but shaped so the existing ConfigFlow can
-                  codegen them later. Click any column in the table inspector
-                  to ask for suggestions.
+                  Every{" "}
+                  <span className="text-text">handler sketch</span> the AI has
+                  proposed so far, grouped by table. Each card expands to show
+                  the steps, fields touched, and why it fires. Use{" "}
+                  <em>Suggest more handlers</em> at the bottom to ask the AI
+                  to fill gaps.
+                </Block>
+
+                <Block
+                  icon={<TriangleAlert className="h-3.5 w-3.5 text-warning" />}
+                  title="Critique tab"
+                >
+                  A second AI pass that reviews the whole design and flags{" "}
+                  <span className="text-text">suspicious patterns</span>,
+                  missing pieces, or risky decisions. Includes{" "}
+                  <em>open questions</em> the AI wants you to decide. Both
+                  have <em>Address with AI</em> buttons that route to the chat.
                 </Block>
 
                 <Block
                   icon={<Sparkles className="h-3.5 w-3.5 text-accent" />}
-                  title="Revisions"
+                  title="Revisions tab"
                 >
-                  Every refinement from chat / Address with AI generates a
-                  <span className="text-text"> revision proposal</span> with a
-                  before/after diff. Approve to apply, drop to discard, or
-                  restore an old revision.
+                  Every refinement from chat or <em>Address with AI</em>{" "}
+                  generates a <span className="text-text">revision proposal</span>{" "}
+                  with a before/after diff. Approve to apply, drop to discard.
+                </Block>
+
+                <Block
+                  icon={<HelpCircle className="h-3.5 w-3.5 text-accentAlt" />}
+                  title="Click a table / field"
+                >
+                  Tables show their{" "}
+                  <span className="text-text">state machine</span>, columns,
+                  FKs, and related handlers. Click a column to see, per state,
+                  which actions and handlers touch that field as the row leaves
+                  that state.
                 </Block>
               </div>
 
@@ -141,9 +138,11 @@ export function AboutCockpit() {
                   <ArrowRight className="h-3 w-3 text-accent" />
                   Typical loop
                 </div>
-                Upload → answer clarifying questions → review the proposed
-                design → address critique / open questions in chat → approve
-                the final design.
+                Upload → answer clarifying questions → watch the{" "}
+                <span className="text-text">Activity</span> stepper run →
+                browse tables / handlers → address critique &amp; open questions in
+                chat → <span className="text-text">Export</span> to YAML/JSON/SQL
+                or Approve.
               </div>
             </motion.div>
           </motion.div>

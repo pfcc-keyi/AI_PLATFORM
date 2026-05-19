@@ -3,21 +3,17 @@
 import {
   AlertOctagon,
   AlertTriangle,
-  Compass,
   HelpCircle,
   Info,
-  Lightbulb,
   MessageSquarePlus,
   X
 } from "lucide-react";
 import * as React from "react";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { useDesignStore } from "@/store/designStore";
 import type {
   DesignCritique,
   DesignIssue,
-  DomainAnalysis,
   IssueSeverity
 } from "@/lib/types";
 
@@ -34,11 +30,15 @@ const SEV_LABEL: Record<IssueSeverity, string> = {
 };
 
 interface AssumptionDrawerProps {
-  domain: DomainAnalysis | undefined;
   critique: DesignCritique | undefined | null;
 }
 
-export function AssumptionDrawer({ domain, critique }: AssumptionDrawerProps) {
+/**
+ * "Critique" tab content. Domain analysis used to live here too but has moved
+ * up into the Activity tab — this panel is now purely about the second-pass
+ * design critique + open questions.
+ */
+export function AssumptionDrawer({ critique }: AssumptionDrawerProps) {
   const setPendingChatPrompt = useDesignStore((s) => s.setPendingChatPrompt);
   const dismissed = useDesignStore((s) => s.dismissedQuestions);
   const dismissQuestion = useDesignStore((s) => s.dismissQuestion);
@@ -47,151 +47,96 @@ export function AssumptionDrawer({ domain, critique }: AssumptionDrawerProps) {
     setPendingChatPrompt(prompt);
   }
 
+  if (!critique) {
+    return (
+      <div className="rounded-md border border-dashed border-border/60 px-3 py-3 text-xs text-muted">
+        The critic agent hasn&apos;t finished reviewing yet — refresh or use{" "}
+        <span className="text-text/90">Re-run critic</span> in the top bar.
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3">
-      {/* DOMAIN — what the AI thinks this schema is and where the educated
-          guesses are. */}
-      {domain ? (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
-                <Compass className="h-3.5 w-3.5 text-accent" />
-                Domain analysis
-              </div>
-              <span
-                title="The AI's reading of the upload before any per-table design work runs."
-                className="cursor-help text-[10px] text-muted"
-              >
-                what is this schema?
-              </span>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
+              <HelpCircle className="h-3.5 w-3.5 text-accent" />
+              Design critique
             </div>
-          </CardHeader>
-          <CardBody className="flex flex-col gap-2.5">
-            <div className="text-sm">
-              <span className="text-muted">Guessed domain:</span>{" "}
-              <span className="font-medium text-accent">
-                {domain.domain_guess || "unknown"}
-              </span>
-            </div>
-            {domain.sub_domains.length ? (
-              <div className="flex flex-col gap-1">
-                <div className="text-[10px] uppercase tracking-wider text-muted">
-                  Sub-domains
-                </div>
-                <div className="flex flex-wrap gap-1">
-                  {domain.sub_domains.map((d) => (
-                    <Badge key={d} variant="accent">
-                      {d}
-                    </Badge>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            {domain.assumptions.length ? (
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted">
-                  <Lightbulb className="h-3 w-3 text-accent" />
-                  Assumptions the AI made
-                </div>
-                <ul className="ml-4 list-disc text-xs text-text/90">
-                  {domain.assumptions.map((a, i) => (
-                    <li key={i}>{a}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {domain.reasoning ? (
-              <div className="rounded-md border border-border/60 bg-bg/30 p-2 text-xs italic text-muted">
-                {domain.reasoning}
-              </div>
-            ) : null}
-          </CardBody>
-        </Card>
-      ) : null}
+            <span
+              title="A second AI pass that looks at the full design as a whole and flags suspicious patterns, missing pieces, or risky decisions."
+              className="cursor-help text-[10px] text-muted"
+            >
+              what could go wrong?
+            </span>
+          </div>
+        </CardHeader>
+        <CardBody className="flex flex-col gap-2.5">
+          <div className="rounded-md border border-border/60 bg-bg/30 p-2 text-[11px] leading-relaxed text-muted">
+            A separate critic agent reviewed the whole design after it was
+            generated. Each issue below is a suggestion you can{" "}
+            <span className="text-text/90">address with the AI chat</span>{" "}
+            (turns it into a revision proposal), or just{" "}
+            <span className="text-text/90">ignore</span>.
+          </div>
 
-      {/* CRITIQUE — what the DesignCriticAgent flagged. */}
-      {critique ? (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
-                <HelpCircle className="h-3.5 w-3.5 text-accent" />
-                Design critique
+          {critique.summary ? (
+            <div className="text-sm text-text/95">{critique.summary}</div>
+          ) : null}
+
+          {/* ISSUES */}
+          <div className="flex flex-col gap-1.5">
+            <div className="text-[10px] uppercase tracking-wider text-muted">
+              Issues ({(critique.issues ?? []).length})
+            </div>
+            {(critique.issues ?? []).length === 0 ? (
+              <div className="rounded-md border border-dashed border-border/60 px-2 py-2 text-xs text-muted">
+                No issues raised.
               </div>
-              <span
-                title="A second AI pass that looks at the full design as a whole and flags suspicious patterns, missing pieces, or risky decisions."
-                className="cursor-help text-[10px] text-muted"
-              >
-                what could go wrong?
-              </span>
-            </div>
-          </CardHeader>
-          <CardBody className="flex flex-col gap-2.5">
-            <div className="rounded-md border border-border/60 bg-bg/30 p-2 text-[11px] leading-relaxed text-muted">
-              A separate critic agent reviewed the whole design after it was
-              generated. Each issue below is a suggestion you can{" "}
-              <span className="text-text/90">address with the AI chat</span>{" "}
-              (turns it into a revision proposal), or just{" "}
-              <span className="text-text/90">ignore</span>.
-            </div>
+            ) : (
+              (critique.issues ?? [])
+                .slice(0, 30)
+                .map((i, idx) => (
+                  <IssueRow
+                    key={`${i.target}-${idx}`}
+                    issue={i}
+                    onAskAI={askAI}
+                  />
+                ))
+            )}
+          </div>
 
-            {critique.summary ? (
-              <div className="text-sm text-text/95">{critique.summary}</div>
-            ) : null}
-
-            {/* ISSUES */}
+          {/* OPEN QUESTIONS — now actionable, not just flat text */}
+          {critique.open_questions && critique.open_questions.length ? (
             <div className="flex flex-col gap-1.5">
               <div className="text-[10px] uppercase tracking-wider text-muted">
-                Issues ({(critique.issues ?? []).length})
+                Open questions ({critique.open_questions.length})
               </div>
-              {(critique.issues ?? []).length === 0 ? (
-                <div className="rounded-md border border-dashed border-border/60 px-2 py-2 text-xs text-muted">
-                  No issues raised.
+              <div className="rounded-md border border-border/60 bg-bg/30 px-2 py-1.5 text-[10px] text-muted">
+                Things the AI couldn&apos;t decide for you. Pick one to
+                discuss with the AI chat — your answer becomes a revision.
+              </div>
+              {critique.open_questions
+                .filter((q) => !dismissed.has(q))
+                .map((q, i) => (
+                  <OpenQuestionRow
+                    key={`q-${i}`}
+                    question={q}
+                    onAskAI={askAI}
+                    onDismiss={dismissQuestion}
+                  />
+                ))}
+              {critique.open_questions.every((q) => dismissed.has(q)) ? (
+                <div className="px-2 py-1 text-[11px] text-muted">
+                  All questions dismissed.
                 </div>
-              ) : (
-                (critique.issues ?? [])
-                  .slice(0, 30)
-                  .map((i, idx) => (
-                    <IssueRow
-                      key={`${i.target}-${idx}`}
-                      issue={i}
-                      onAskAI={askAI}
-                    />
-                  ))
-              )}
+              ) : null}
             </div>
-
-            {/* OPEN QUESTIONS — now actionable, not just flat text */}
-            {critique.open_questions && critique.open_questions.length ? (
-              <div className="flex flex-col gap-1.5">
-                <div className="text-[10px] uppercase tracking-wider text-muted">
-                  Open questions ({critique.open_questions.length})
-                </div>
-                <div className="rounded-md border border-border/60 bg-bg/30 px-2 py-1.5 text-[10px] text-muted">
-                  Things the AI couldn&apos;t decide for you. Pick one to
-                  discuss with the AI chat — your answer becomes a revision.
-                </div>
-                {critique.open_questions
-                  .filter((q) => !dismissed.has(q))
-                  .map((q, i) => (
-                    <OpenQuestionRow
-                      key={`q-${i}`}
-                      question={q}
-                      onAskAI={askAI}
-                      onDismiss={dismissQuestion}
-                    />
-                  ))}
-                {critique.open_questions.every((q) => dismissed.has(q)) ? (
-                  <div className="px-2 py-1 text-[11px] text-muted">
-                    All questions dismissed.
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </CardBody>
-        </Card>
-      ) : null}
+          ) : null}
+        </CardBody>
+      </Card>
     </div>
   );
 }
