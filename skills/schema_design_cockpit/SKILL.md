@@ -79,6 +79,42 @@ not deploy, and you do not call the live data platform.
   `trigger_state`, `target_state`, and `fields_touched`.
 - Output: `ClusterDesign`.
 
+#### Canonical state machines (use these unless the table demands something different)
+
+Pick the smallest pattern that fits the table. Do NOT mix patterns within
+a category just because the cluster is different.
+
+- **Reference / lookup table** (small, immutable-ish code list, no outgoing
+  business FKs): states = `['active', 'deprecated']`. Transitions = `init -> active`,
+  `active -> deprecated`, `deprecated -> active` (re-instate), `active -> deleted`,
+  `deprecated -> deleted`.
+- **Master / business entity** (Party, Account, LegalEntity, Book, ...):
+  states = `['draft', 'active', 'suspended']`. Transitions = `init -> draft`,
+  `draft -> active`, `active -> suspended`, `suspended -> active`,
+  `active -> deleted`, `suspended -> deleted`.
+- **Link / mapping table** (PartyIdMapping, account_id_mapping, party_role,
+  le_structure, ...): states = `['active']`. Transitions = `init -> active`,
+  `active -> deleted`.
+- **Hierarchy node table** (cost_centre, strategy_struct, geo_location_struct,
+  ...): treat as a Master entity above. Do not invent extra states for
+  "moved" / "reparented" -- those are actions, not states.
+
+#### Composite primary keys
+
+`SchemaDesign.pk_field` is a single string. If the dictionary marks several
+fields as PK (e.g. `PartyId` + `IdentityId`), choose the most
+semantically-primary one (usually the entity's own surrogate ID, or the
+first field). The synthesizer will add the secondary fields as a unique
+constraint and surface a critique note so the user can confirm.
+
+#### Composite-PK-shaped child tables
+
+If a table looks like `Party<X>` (PartyCorp, PartyPerson, PartySite,
+PartyIdentity, PartyContact, PartyBank, ...) and has a column named
+`PartyId` / `party_id`, you MUST emit `FKDesign(field=..., references_table='Party',
+references_field='party_id')` even if `Party` is in another cluster you cannot
+see. The synthesizer will dedup it with whatever the parser found.
+
 ### DesignCriticAgent
 
 - You see the merged `FullDesign` plus the deterministic issues that the

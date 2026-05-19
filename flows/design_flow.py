@@ -37,7 +37,13 @@ from crews.design_design_crews import (
     make_field_handler_crew,
     make_refinement_crew,
 )
-from flows.design_excel import build_fk_edges, compute_layout, parse_and_cluster
+from flows.design_excel import (
+    _resolve_fk_target,
+    build_fk_edges,
+    compute_layout,
+    parse_and_cluster,
+)
+from models.config_models import FKDesign
 from models.design_models import (
     ClusterDesign,
     ClusterSpec,
@@ -191,6 +197,96 @@ def _issues_summary(issues: list[DesignIssue]) -> str:
 # ---------------------------------------------------------------------------
 # Deterministic validators (no LLM)
 # ---------------------------------------------------------------------------
+
+
+def _inject_cross_cluster_fks(design: FullDesign, parsed: ParsedSchema) -> int:
+    """Inject any parsed FK that is missing from a SchemaDesign's fk_definitions.
+
+    The per-cluster designer only sees its own cluster's tables, so when a
+    table in cluster A has an FK pointing at a table in cluster B, that FK
+    is usually dropped. We walk the parsed schema, resolve each FK target
+    against the full set of design tables (case-insensitive), and add any
+    missing entries. Returns the number of FKs injected.
+    """
+    schema_by_name = {sd.table_name: sd for sd in design.schema_designs}
+    if not schema_by_name:
+        return 0
+    table_names = set(schema_by_name.keys())
+    injected = 0
+
+    for parsed_table in parsed.tables:
+        sd = schema_by_name.get(parsed_table.entity_name)
+        if sd is None:
+            continue
+        existing = {(fk.field, fk.references_table) for fk in sd.fk_definitions}
+        for field in parsed_table.fields:
+            if not field.foreign_key:
+                continue
+            target = _resolve_fk_target(field.foreign_key, table_names)
+            if target is None:
+                continue
+            target_table, target_field = target
+            if (field.name, target_table) in existing:
+                continue
+            sd.fk_definitions.append(
+                FKDesign(
+                    field=field.name,
+                    references_table=target_table,
+                    references_field=target_field or "",
+                )
+            )
+            existing.add((field.name, target_table))
+            injected += 1
+    return injected
+
+
+def _normalize_composite_pk(design: FullDesign) -> list[tuple[str, str]]:
+    """Split comma-separated pk_field strings; return list of (table, composite)
+    pairs the caller can surface as critique issues.
+
+    The cluster designer often encodes a composite PK as ``"PartyId,IdentityId"``
+    because ``pk_field`` is a single string in :class:`SchemaDesign`. We keep
+    the first component as the canonical PK and remember the full composite so
+    the critic can flag it as 'needs review'.
+    """
+    composite: list[tuple[str, str]] = []
+    for sd in design.schema_designs:
+        if not sd.pk_field or "," not in sd.pk_field:
+            continue
+        original = sd.pk_field
+        parts = [p.strip() for p in sd.pk_field.split(",") if p.strip()]
+        if not parts:
+            continue
+        sd.pk_field = parts[0]
+        composite.append((sd.table_name, original))
+    return composite
+
+
+def _clean_invalid_transitions(design: FullDesign) -> int:
+    """Drop transitions whose from/to state isn't in the table's states list,
+    and normalize handler ``trigger_state == 'none'`` to ``'init'``.
+
+    The LLM sometimes invents pseudo-states like 'none' to express creation.
+    For Data Platform purposes, creation is represented by the implicit
+    ``init`` state, so transitions referencing undefined names are noise.
+    Returns the number of transitions dropped.
+    """
+    dropped = 0
+    for sd in design.schema_designs:
+        valid = set(sd.states) | {"init", "deleted"}
+        cleaned = []
+        for t in sd.transitions:
+            if t.from_state in valid and t.to_state in valid:
+                cleaned.append(t)
+            else:
+                dropped += 1
+        sd.transitions = cleaned
+    for h in design.handler_sketches:
+        if h.trigger_state.lower() in ("none", "null", ""):
+            h.trigger_state = "init"
+        if h.target_state.lower() in ("none", "null"):
+            h.target_state = "active"
+    return dropped
 
 
 def _deterministic_validate(design: FullDesign) -> list[DesignIssue]:
@@ -424,9 +520,21 @@ class SchemaDesignFlow(Flow[DesignState]):
             )
         return "questions_check"
 
+    # Maximum number of clarification rounds before the flow force-progresses
+    # to Phase 4. Stops the analyst from looping forever when the user gives
+    # vague answers.
+    MAX_CLARIFICATION_ROUNDS = 2
+
     @router(analyze)
     def check_questions(self) -> str:
         """Phase 2 router."""
+        if self.state.clarification_round >= self.MAX_CLARIFICATION_ROUNDS:
+            logger.info(
+                "design_flow[%s]: hit MAX_CLARIFICATION_ROUNDS=%d, advancing to design",
+                self.state.design_id,
+                self.MAX_CLARIFICATION_ROUNDS,
+            )
+            return "ready"
         if (
             self.state.domain_analysis is not None
             and self.state.domain_analysis.questions
@@ -539,6 +647,37 @@ class SchemaDesignFlow(Flow[DesignState]):
             schema_designs.extend(cluster_design.schema_designs)
             handler_sketches.extend(cluster_design.handler_sketches)
 
+        # Build a provisional FullDesign so the deterministic cleanup helpers
+        # below can mutate the SchemaDesigns in place.
+        provisional = FullDesign(
+            design_id=self.state.design_id,
+            parsed_schema=self.state.parsed_schema,
+            domain_analysis=self.state.domain_analysis,
+            schema_designs=schema_designs,
+            handler_sketches=handler_sketches,
+        )
+
+        # Phase 5a -- post-merge cleanup that no individual cluster designer
+        # could do, because it requires the full table set:
+        #   1. inject cross-cluster FKs the cluster designers dropped
+        #   2. normalize composite PKs encoded as "a,b" strings
+        #   3. drop transitions referencing states that aren't declared
+        injected_fks = _inject_cross_cluster_fks(provisional, self.state.parsed_schema)
+        composite_pks = _normalize_composite_pk(provisional)
+        dropped_transitions = _clean_invalid_transitions(provisional)
+        if injected_fks or composite_pks or dropped_transitions:
+            logger.info(
+                "design_flow[%s]: post-merge cleanup -- injected %d cross-cluster FKs, "
+                "normalized %d composite PKs, dropped %d invalid transitions",
+                self.state.design_id,
+                injected_fks,
+                len(composite_pks),
+                dropped_transitions,
+            )
+
+        schema_designs = provisional.schema_designs
+        handler_sketches = provisional.handler_sketches
+
         # Layout (deterministic): cluster ring + intra-cluster ring
         table_names = [sd.table_name for sd in schema_designs] or [
             t.entity_name for t in self.state.parsed_schema.tables
@@ -565,6 +704,35 @@ class SchemaDesignFlow(Flow[DesignState]):
         )
 
         deterministic_issues = _deterministic_validate(full)
+        # Surface the composite-PK / cross-cluster cleanup events to the user
+        # via the critique stream too, so they know we touched these tables.
+        for table_name, original_pk in composite_pks:
+            deterministic_issues.append(
+                DesignIssue(
+                    severity="warning",
+                    target=f"table:{table_name}",
+                    message=(
+                        f"Composite PK '{original_pk}' was normalized to '{original_pk.split(',', 1)[0].strip()}'; "
+                        "the Data Platform's SchemaDesign supports a single pk_field today."
+                    ),
+                    suggested_fix=(
+                        "Confirm the chosen field is the canonical PK or move the "
+                        "secondary fields to unique_constraints."
+                    ),
+                )
+            )
+        if injected_fks:
+            deterministic_issues.append(
+                DesignIssue(
+                    severity="info",
+                    target="design:cross_cluster_fks",
+                    message=(
+                        f"Auto-injected {injected_fks} cross-cluster FK definitions "
+                        "from the parsed schema that individual cluster designers had dropped."
+                    ),
+                    suggested_fix="",
+                )
+            )
 
         # Critic adds semantic issues; deterministic ones are passed in
         # to avoid duplication.

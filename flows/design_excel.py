@@ -83,12 +83,33 @@ def _is_pk(value: object) -> bool:
 
 
 def _clean_fk(value: object) -> Optional[str]:
+    """Normalize a Foreign Key cell into ``Table.Field`` form.
+
+    The hand-written dictionaries we see in the wild mix several conventions:
+    ``Party.PartyId``, ``party.party_id``, ``party(party_id)`` (SQL DDL
+    style), ``account_id_mapping -> accounts(account)``, and noise like
+    ``code and become primary key )``. We normalize what we can and only
+    return a best-effort string; ``_resolve_fk_target`` still has the final
+    say on whether a target table actually exists.
+    """
     text = _stringify(value)
     if not text:
         return None
-    # Normalise common arrow/dash separators to a dot.
+    # Normalize arrow / dash separators.
     text = text.replace("→", ".").replace("->", ".").replace(" - ", ".")
-    return text
+    # Strip leading "ref:" / "fk:" prefixes some dictionaries use.
+    text = re.sub(r"^(?:ref|references|fk)\s*[:=]\s*", "", text, flags=re.I)
+    # Convert SQL-DDL style ``table(col)`` -> ``table.col`` (we only care
+    # about the first paren group; anything after is treated as commentary).
+    m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([^),]+?)\s*\)", text)
+    if m:
+        text = f"{m.group(1)}.{m.group(2)}"
+    # If, after normalization, the value still looks like a free-text comment
+    # (no dot, lots of spaces, stray closing paren), keep just the first
+    # whitespace-delimited token so the resolver can do a single table lookup.
+    if " " in text and "." not in text:
+        text = text.split(maxsplit=1)[0].rstrip(")")
+    return text.strip()
 
 
 def _parse_sheet(sheet, sheet_name: str) -> list[ParsedTable]:
@@ -310,6 +331,62 @@ def _louvain_clusters(table_names: list[str], edges: list[dict]) -> dict[str, in
         return cluster_of
 
 
+def _looks_like_lookup(table: ParsedTable) -> bool:
+    """A reference/lookup table is small and has no outgoing FKs.
+
+    Heuristic only -- the analyst agent can override the categorization
+    later. Used to fold many singleton reference tables into a single
+    'Reference Data' cluster so the analyst sees ~5 meaningful clusters
+    instead of 20+ trivial ones.
+    """
+    if len(table.fields) > 5:
+        return False
+    outgoing = sum(1 for f in table.fields if f.foreign_key)
+    return outgoing == 0
+
+
+def _consolidate_singletons(
+    partition: dict[str, int],
+    schema: ParsedSchema,
+) -> dict[str, int]:
+    """Fold singleton lookup-shaped tables into one ``Reference Data`` bucket.
+
+    Louvain on a sparse / partially-disconnected FK graph routinely emits a
+    swarm of size-1 clusters that are clearly reference data (TypeList,
+    CountryCode, etc.). Merging them into one bucket lets the LLM treat
+    them uniformly without producing dozens of tiny ``Cluster N`` blobs.
+    Non-lookup singletons keep their own cluster -- they may be genuinely
+    orphan business entities the analyst should flag.
+    """
+    counts: dict[int, int] = {}
+    for cid in partition.values():
+        counts[cid] = counts.get(cid, 0) + 1
+
+    by_name = {t.entity_name: t for t in schema.tables}
+    reference_bucket = max(partition.values(), default=-1) + 1
+    moved = 0
+    for name, cid in list(partition.items()):
+        if counts.get(cid, 0) != 1:
+            continue
+        table = by_name.get(name)
+        if table is None:
+            continue
+        if _looks_like_lookup(table):
+            partition[name] = reference_bucket
+            moved += 1
+
+    if moved == 0:
+        return partition
+
+    # Re-number cluster ids so they are contiguous 0..N-1 and stable.
+    ordered: dict[int, int] = {}
+    next_id = 0
+    for cid in sorted(set(partition.values())):
+        ordered[cid] = next_id
+        next_id += 1
+    return {name: ordered[cid] for name, cid in partition.items()}
+
+
 def build_clusters(schema: ParsedSchema, edges: Iterable[dict] | None = None) -> list[ClusterSpec]:
     """Deterministic clustering of tables. Names are placeholders -- the
     `DomainAnalystAgent` renames them later.
@@ -320,19 +397,29 @@ def build_clusters(schema: ParsedSchema, edges: Iterable[dict] | None = None) ->
 
     edge_list = list(edges) if edges is not None else build_fk_edges(schema)
     partition = _louvain_clusters(table_names, edge_list)
+    partition = _consolidate_singletons(partition, schema)
 
     buckets: dict[int, list[str]] = {}
     for name, cid in partition.items():
         buckets.setdefault(cid, []).append(name)
 
+    by_name = {t.entity_name: t for t in schema.tables}
     specs: list[ClusterSpec] = []
-    for idx, (raw_id, members) in enumerate(sorted(buckets.items())):
+    for idx, (_raw_id, members) in enumerate(sorted(buckets.items())):
+        members_sorted = sorted(members)
+        is_reference = all(
+            _looks_like_lookup(by_name[m]) for m in members_sorted if m in by_name
+        ) and len(members_sorted) > 1
         specs.append(
             ClusterSpec(
                 cluster_id=f"c{idx}",
-                name=f"Cluster {idx + 1}",
-                table_names=sorted(members),
-                rationale="Deterministic FK-graph community (Louvain).",
+                name="Reference Data" if is_reference else f"Cluster {idx + 1}",
+                table_names=members_sorted,
+                rationale=(
+                    "Lookup/reference tables consolidated by deterministic heuristic"
+                    if is_reference
+                    else "Deterministic FK-graph community (Louvain)."
+                ),
             )
         )
     return specs
