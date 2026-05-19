@@ -75,6 +75,13 @@ function DesignPageInner({ designId }: { designId: string }) {
     queryKey: ["design", designId],
     queryFn: () => getDesign(designId),
     refetchOnWindowFocus: false,
+    retry: (failureCount, err) => {
+      // A 404 means the design genuinely isn't on this backend (e.g. the
+      // service was rebuilt and lost in-memory state). Retrying just causes
+      // the UI to flicker between "Loading" and the error banner.
+      if (err instanceof Error && /^404\b/.test(err.message)) return false;
+      return failureCount < 1;
+    },
     refetchInterval: (q) => {
       const data = q.state.data;
       if (!data) return 2000;
@@ -136,9 +143,34 @@ function DesignPageInner({ designId }: { designId: string }) {
   }
 
   if (error) {
+    const msg = String(error);
+    const is404 = /\b404\b/.test(msg);
     return (
-      <div className="flex h-screen items-center justify-center text-danger">
-        Failed to load design: {String(error)}
+      <div className="flex h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+        <div className="max-w-xl text-danger">
+          {is404 ? (
+            <>
+              <div className="text-lg font-semibold">
+                This design isn&apos;t on the backend.
+              </div>
+              <div className="mt-2 text-sm text-danger/90">
+                The backend service may have restarted (which clears the
+                in-memory session) before the design finished and was
+                persisted. Please go back and upload again.
+              </div>
+            </>
+          ) : (
+            <>Failed to load design: {msg}</>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={() => refetch()}>
+            Retry
+          </Button>
+          <Link href="/">
+            <Button variant="ghost">Back to uploads</Button>
+          </Link>
+        </div>
       </div>
     );
   }

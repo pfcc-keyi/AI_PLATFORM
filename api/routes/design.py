@@ -557,22 +557,55 @@ async def critique(design_id: str, req: CritiqueRequest) -> dict[str, Any]:
 
 @router.get("/{design_id}")
 async def get_design(design_id: str) -> dict[str, Any]:
+    """Return a snapshot of the design.
+
+    Resolution order:
+    1. If a live flow exists with a finalized ``full_design`` (Phase 5+), use it.
+    2. Else fall back to the on-disk snapshot written by ``save_design``.
+    3. If neither exists but a live flow is mid-run (Phases 1-4 with no
+       finalized design yet), still return 200 with whatever phase / questions
+       / parsed_schema we have, so the UI can render placeholders + the
+       clarification card instead of seeing a hard 404.
+    4. Only 404 when no flow AND no disk snapshot exist.
+    """
     flow = _active_designs.get(design_id)
-    full = None
+    full: Optional[FullDesign] = None
     if flow and flow.state.full_design:
         full = flow.state.full_design
-    else:
+    if full is None:
         full = design_store.load_design(design_id)
-        if full is None:
-            raise HTTPException(status_code=404, detail="design not found")
-    response: dict[str, Any] = {
-        "design_id": design_id,
-        "design": full.model_dump(),
-    }
-    if flow:
+    if full is None and flow is None:
+        raise HTTPException(status_code=404, detail="design not found")
+
+    response: dict[str, Any] = {"design_id": design_id}
+    if full is not None:
+        response["design"] = full.model_dump()
+    if flow is not None:
         response.update(_state_response(flow))
+        # Surface intermediate parse output so the UI can show table count /
+        # cluster count even before Phase 5 finalizes the FullDesign.
+        if full is None and flow.state.parsed_schema is not None:
+            parsed = flow.state.parsed_schema
+            response["parsed_preview"] = {
+                "table_count": len(parsed.tables),
+                "fk_count": parsed.fk_count,
+                "sheet_count": parsed.sheet_count,
+            }
+        if full is None and flow.state.domain_analysis is not None:
+            response["domain_preview"] = {
+                "domain_guess": flow.state.domain_analysis.domain_guess,
+                "sub_domains": flow.state.domain_analysis.sub_domains,
+                "cluster_count": len(flow.state.domain_analysis.clusters),
+            }
     else:
-        response.update({"phase": "ready", "questions": [], "pending_revisions": []})
+        response.update(
+            {
+                "phase": "ready",
+                "questions": [],
+                "pending_revisions": [],
+                "clarification_round": 0,
+            }
+        )
     return response
 
 

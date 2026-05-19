@@ -324,6 +324,25 @@ class SchemaDesignFlow(Flow[DesignState]):
         self.state.parsed_schema = parsed
         self.state.clusters_raw = clusters
         self.state.phase = "analyzing"
+        # Persist a partial snapshot so the index lists the design and the
+        # GET handler can rehydrate something useful even if the backend
+        # restarts between phases. The snapshot has parsed_schema populated
+        # and empty schema_designs / handler_sketches -- Phase 5 will
+        # overwrite this with the full design.
+        try:
+            design_store.save_design(
+                FullDesign(
+                    design_id=self.state.design_id,
+                    parsed_schema=parsed,
+                    domain_analysis=DomainAnalysis(clusters=clusters),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- snapshot is best-effort
+            logger.warning(
+                "design_flow[%s]: failed to persist phase-1 snapshot (%s)",
+                self.state.design_id,
+                exc,
+            )
         logger.info(
             "design_flow[%s]: phase 1 done, %d tables / %d clusters",
             self.state.design_id,
@@ -371,6 +390,23 @@ class SchemaDesignFlow(Flow[DesignState]):
             self.state.clusters_raw, analysis.clusters
         )
         self.state.domain_analysis = analysis
+        # Refresh the on-disk partial snapshot with the analyst's domain
+        # guess / questions so a refresh shows real domain context, not just
+        # the raw parsed schema.
+        try:
+            design_store.save_design(
+                FullDesign(
+                    design_id=self.state.design_id,
+                    parsed_schema=self.state.parsed_schema,
+                    domain_analysis=analysis,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- snapshot is best-effort
+            logger.warning(
+                "design_flow[%s]: failed to persist phase-2 snapshot (%s)",
+                self.state.design_id,
+                exc,
+            )
         return "questions_check"
 
     @router(analyze)
