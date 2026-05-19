@@ -3,11 +3,14 @@
 import * as React from "react";
 import ReactFlow, {
   Background,
+  BaseEdge,
   Controls,
   Edge,
+  EdgeLabelRenderer,
+  EdgeProps,
+  MarkerType,
   Node,
-  Position,
-  MarkerType
+  Position
 } from "reactflow";
 import "reactflow/dist/style.css";
 import dagre from "dagre";
@@ -19,112 +22,236 @@ interface StateTransitionPanelProps {
   height?: number | string;
 }
 
-/** Loosely categorise a state into a colour bucket so the graph reads at a
- * glance. "init" / "deleted" are terminal pseudo-states; "approved" /
- * "active" feel like success; "rejected" / "void" feel like failure; anything
- * else is neutral accent. */
-function stateKind(
-  s: string
-): "terminal" | "success" | "danger" | "warning" | "default" {
-  const l = s.toLowerCase();
-  if (l === "init" || l === "deleted" || l === "void") return "terminal";
-  if (
-    l.includes("approved") ||
-    l.includes("active") ||
-    l.includes("done") ||
-    l.includes("ready")
-  )
-    return "success";
-  if (
-    l.includes("rejected") ||
-    l.includes("failed") ||
-    l.includes("error") ||
-    l.includes("cancel")
-  )
-    return "danger";
-  if (
-    l.includes("pending") ||
-    l.includes("await") ||
-    l.includes("review") ||
-    l.includes("draft")
-  )
-    return "warning";
-  return "default";
-}
+/* ---------------------------------------------------------------------------
+ * Visual constants
+ * ------------------------------------------------------------------------ */
 
-const STATE_PALETTE: Record<
-  ReturnType<typeof stateKind>,
-  { bg: string; border: string; text: string }
-> = {
-  terminal: {
-    bg: "rgb(25 30 45)",
-    border: "rgb(148 156 178 / 0.45)",
-    text: "rgb(232 234 240)"
-  },
-  success: {
-    bg: "rgb(92 218 162 / 0.18)",
-    border: "rgb(92 218 162 / 0.7)",
-    text: "rgb(220 255 235)"
-  },
-  danger: {
-    bg: "rgb(246 96 122 / 0.18)",
-    border: "rgb(246 96 122 / 0.7)",
-    text: "rgb(255 220 230)"
-  },
-  warning: {
-    bg: "rgb(252 196 110 / 0.18)",
-    border: "rgb(252 196 110 / 0.7)",
-    text: "rgb(255 240 215)"
-  },
-  default: {
-    bg: "rgb(168 119 255 / 0.18)",
-    border: "rgb(168 119 255 / 0.6)",
-    text: "rgb(232 234 240)"
-  }
-};
+/* Per UX feedback we no longer colour-code states by name (success / warning
+ * / danger buckets felt arbitrary and "all transparent"). Every real state
+ * uses the SAME palette; only the synthetic `init` / `deleted` / `void`
+ * pseudo-states get a different muted look so users can tell at a glance
+ * which states are real vs scaffolding. */
+const STATE_STYLE = {
+  bg: "rgb(168 119 255 / 0.22)",
+  border: "rgb(168 119 255)",
+  text: "rgb(232 234 240)"
+} as const;
 
-/* Approximate render size of a state pill so dagre can pack nodes without
- * overlap and so we can offset positions to top-left in ReactFlow. */
+const TERMINAL_STYLE = {
+  bg: "rgb(25 30 45)",
+  border: "rgb(148 156 178 / 0.7)",
+  text: "rgb(200 206 224)"
+} as const;
+
+/* Edges are solid (no alpha) — user explicitly asked for no transparent
+ * lines. The pinned colour is a brighter white so the selected edge pops
+ * even on a busy diagram. */
+const EDGE_COLOR = "rgb(168 119 255)";
+const EDGE_COLOR_PINNED = "rgb(232 234 240)";
+
 const NODE_W = 130;
 const NODE_H = 36;
 
-/** Build the node + edge arrays. dagre lays them out left→right so transitions
- *  flow in one direction and don't cross underneath the pills. */
+function isTerminal(s: string): boolean {
+  const l = s.toLowerCase();
+  return l === "init" || l === "deleted" || l === "void";
+}
+
+/* ---------------------------------------------------------------------------
+ * Custom edge: handles self-loops + parallel/back-edges without overlap
+ * ------------------------------------------------------------------------ */
+
+interface EdgeData {
+  /** Perpendicular offset multiplier (..-1, 0, +1..) used when several edges
+   *  connect the same unordered pair of nodes so they don't sit on top of
+   *  each other. */
+  parallelOffset: number;
+}
+
+function StateEdge(props: EdgeProps) {
+  const {
+    id,
+    source,
+    target,
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    style,
+    markerEnd,
+    label,
+    data
+  } = props;
+
+  const parallelOffset = (data as EdgeData | undefined)?.parallelOffset ?? 0;
+
+  /* -- Self-loop (source === target) -----------------------------------
+   * ReactFlow's built-in edges collapse to a 0-length line when source
+   * and target coincide, so we draw our own cubic-bezier "ear" looping
+   * above the node. */
+  if (source === target) {
+    const r = 30;
+    const c1x = sourceX + r * 1.7;
+    const c1y = sourceY - r * 2.4;
+    const c2x = sourceX - r * 1.7;
+    const c2y = sourceY - r * 2.4;
+    const path = `M ${sourceX} ${sourceY} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${targetX} ${targetY}`;
+    return (
+      <>
+        <BaseEdge
+          id={id}
+          path={path}
+          style={style}
+          markerEnd={markerEnd}
+          interactionWidth={20}
+        />
+        {label ? (
+          <EdgeLabel x={sourceX} y={sourceY - r * 1.9}>
+            {label}
+          </EdgeLabel>
+        ) : null}
+      </>
+    );
+  }
+
+  /* -- Normal edge: quadratic bezier with perpendicular offset ---------
+   * The control point sits on the perpendicular of the source→target
+   * line so back-edges and parallel edges land on opposite sides. This
+   * lets the user "see" two edges between the same pair without them
+   * overlapping into one fat invisible line. */
+  const dx = targetX - sourceX;
+  const dy = targetY - sourceY;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const px = -dy / len;
+  const py = dx / len;
+  // Base curve is always present so even single edges feel less harsh;
+  // parallel siblings push further out in alternating directions.
+  const offset = 24 + parallelOffset * 38;
+  const mx = (sourceX + targetX) / 2 + px * offset;
+  const my = (sourceY + targetY) / 2 + py * offset;
+  const path = `M ${sourceX} ${sourceY} Q ${mx} ${my} ${targetX} ${targetY}`;
+
+  return (
+    <>
+      <BaseEdge
+        id={id}
+        path={path}
+        style={style}
+        markerEnd={markerEnd}
+        interactionWidth={20}
+      />
+      {label ? (
+        <EdgeLabel x={mx} y={my}>
+          {label}
+        </EdgeLabel>
+      ) : null}
+    </>
+  );
+}
+
+function EdgeLabel({
+  x,
+  y,
+  children
+}: {
+  x: number;
+  y: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <EdgeLabelRenderer>
+      <div
+        style={{
+          position: "absolute",
+          transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
+          background: "rgb(18 22 33)",
+          color: "rgb(232 234 240)",
+          padding: "3px 8px",
+          borderRadius: 6,
+          border: "1px solid rgb(168 119 255)",
+          fontSize: 11,
+          fontWeight: 500,
+          letterSpacing: "0.02em",
+          whiteSpace: "nowrap",
+          pointerEvents: "all",
+          boxShadow: "0 2px 8px rgb(0 0 0 / 0.45)"
+        }}
+      >
+        {children}
+      </div>
+    </EdgeLabelRenderer>
+  );
+}
+
+/* Defined at module scope so ReactFlow doesn't yell about "new edgeTypes
+ * object every render". */
+const EDGE_TYPES = { state: StateEdge } as const;
+
+/* ---------------------------------------------------------------------------
+ * Graph builder
+ * ------------------------------------------------------------------------ */
+
+/** Build nodes + edges from a SchemaDesign.
+ *
+ * Edges are the UNION of:
+ *   - `table.transitions[*]` (declared state-machine moves), and
+ *   - `table.actions[*].transition` (every action's effect — this is what
+ *     surfaces self-loops like `approve_kyc (active → active)` that don't
+ *     have an explicit transitions row).
+ *
+ * Each unique (from, to) pair becomes ONE edge; the action labels for that
+ * pair are joined on the edge so clicking it shows every action that fires
+ * along that line. */
 function buildGraph(table: SchemaDesign) {
+  /* Collect the full pair set (transitions ∪ actions) ------------------ */
+  const pairSet = new Set<string>();
+  const pairs: { from: string; to: string }[] = [];
+
+  function addPair(from: string, to: string) {
+    if (!from || !to) return;
+    const key = `${from}|${to}`;
+    if (pairSet.has(key)) return;
+    pairSet.add(key);
+    pairs.push({ from, to });
+  }
+
+  table.transitions.forEach((t) => addPair(t.from_state, t.to_state));
+  table.actions.forEach((a) => {
+    if (a.transition) addPair(a.transition.from_state, a.transition.to_state);
+  });
+
+  /* States: union of declared states + every referenced state ---------- */
   const allStates = new Set<string>(table.states ?? []);
-  allStates.add("init");
-  allStates.add("deleted");
-  table.transitions.forEach((t) => {
-    allStates.add(t.from_state);
-    allStates.add(t.to_state);
+  pairs.forEach((p) => {
+    allStates.add(p.from);
+    allStates.add(p.to);
   });
   const states = Array.from(allStates);
 
+  /* Dagre LR layout — self-loops are not real edges in dagre's eyes,
+   * we skip them so they don't distort node ranks. */
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(() => ({}));
-  // Left → right with comfy spacing so arrows route around nodes, not under.
   g.setGraph({
     rankdir: "LR",
-    nodesep: 28,
-    ranksep: 80,
-    marginx: 18,
-    marginy: 18,
-    ranker: "tight-tree"
+    nodesep: 60,
+    ranksep: 110,
+    marginx: 24,
+    marginy: 24,
+    ranker: "longest-path"
   });
-
   for (const s of states) {
     g.setNode(s, { width: NODE_W, height: NODE_H });
   }
-  table.transitions.forEach((t) => {
-    g.setEdge(t.from_state, t.to_state);
-  });
-
+  for (const p of pairs) {
+    if (p.from !== p.to) g.setEdge(p.from, p.to);
+  }
   dagre.layout(g);
 
+  /* Nodes -------------------------------------------------------------- */
   const nodes: Node[] = states.map((s) => {
     const pos = g.node(s);
-    const kind = stateKind(s);
-    const palette = STATE_PALETTE[kind];
+    const palette = isTerminal(s) ? TERMINAL_STYLE : STATE_STYLE;
     return {
       id: s,
       position: { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 },
@@ -138,6 +265,7 @@ function buildGraph(table: SchemaDesign) {
         padding: "6px 14px",
         background: palette.bg,
         borderColor: palette.border,
+        borderWidth: 1.5,
         color: palette.text,
         fontWeight: 500,
         fontSize: 12,
@@ -149,7 +277,7 @@ function buildGraph(table: SchemaDesign) {
     };
   });
 
-  const actionsByEdge: Record<string, string[]> = {};
+  /* Group action names per pair --------------------------------------- */
   const actionByPair: Record<string, string[]> = {};
   table.actions.forEach((a) => {
     if (!a.transition) return;
@@ -158,31 +286,68 @@ function buildGraph(table: SchemaDesign) {
     actionByPair[key].push(a.name);
   });
 
-  const baseEdges: Edge[] = table.transitions.map((t, i) => {
+  /* Parallel edge handling -------------------------------------------- *
+   * Two directed pairs that share the same unordered endpoints (A→B and
+   * B→A) need to live on opposite sides of the line so they don't
+   * overlap. Count siblings per unordered key, then assign offsets
+   * symmetrically around 0. */
+  const unorderedCount: Record<string, number> = {};
+  const unorderedAssigned: Record<string, number> = {};
+  for (const p of pairs) {
+    if (p.from === p.to) continue;
+    const k = [p.from, p.to].sort().join("|");
+    unorderedCount[k] = (unorderedCount[k] || 0) + 1;
+  }
+
+  const actionsByEdge: Record<string, string[]> = {};
+  const baseEdges: Edge[] = pairs.map((p, i) => {
     const edgeId = `e${i}`;
-    const key = `${t.from_state}|${t.to_state}`;
-    actionsByEdge[edgeId] = actionByPair[key] || [];
+    actionsByEdge[edgeId] = actionByPair[`${p.from}|${p.to}`] || [];
+
+    let parallelOffset = 0;
+    if (p.from !== p.to) {
+      const k = [p.from, p.to].sort().join("|");
+      const total = unorderedCount[k];
+      const assigned = unorderedAssigned[k] || 0;
+      unorderedAssigned[k] = assigned + 1;
+      if (total > 1) {
+        // Center offsets around 0 so 2 edges get -0.5/+0.5, 3 get -1/0/+1, etc.
+        const centred = assigned - (total - 1) / 2;
+        // Forward vs back edges already flip the perpendicular sign because
+        // (px, py) is computed from (target - source). So an A→B edge and a
+        // B→A edge with the same `centred` value end up on opposite sides
+        // automatically. We still nudge same-direction parallels (rare) so
+        // they don't stack.
+        parallelOffset = centred;
+      }
+    }
+
     return {
       id: edgeId,
-      source: t.from_state,
-      target: t.to_state,
-      type: "smoothstep",
-      animated: true,
+      source: p.from,
+      target: p.to,
+      type: "state",
+      data: { parallelOffset } as EdgeData,
       markerEnd: {
         type: MarkerType.ArrowClosed,
-        color: "rgb(168 119 255)",
+        color: EDGE_COLOR,
         width: 18,
         height: 18
       },
       style: {
-        stroke: "rgb(168 119 255 / 0.75)",
-        strokeWidth: 1.6
+        stroke: EDGE_COLOR, // solid — no alpha
+        strokeWidth: 1.8,
+        fill: "none"
       }
     };
   });
 
   return { nodes, baseEdges, actionsByEdge };
 }
+
+/* ---------------------------------------------------------------------------
+ * Component
+ * ------------------------------------------------------------------------ */
 
 export function StateTransitionPanel({
   table,
@@ -195,34 +360,28 @@ export function StateTransitionPanel({
     [table]
   );
 
-  // Decorate base edges with pin state. Per user feedback we no longer reveal
-  // labels on hover — only clicked/pinned edges show their actions. This
-  // prevents long action names from sweeping across pills as the cursor moves.
+  /* Decorate base edges with pin state.
+   * Per UX feedback: NO hover behaviour, NO transparency. Pinned edge
+   * gets a brighter colour + thicker stroke + the joined action label. */
   const edges: Edge[] = React.useMemo(() => {
     return baseEdges.map((e) => {
-      const isActive = pinnedEdge === e.id;
+      const isPinned = pinnedEdge === e.id;
       const actions = actionsByEdge[e.id] || [];
-      const label = isActive && actions.length > 0 ? actions.join(" / ") : undefined;
+      const label = isPinned && actions.length > 0 ? actions.join(" / ") : undefined;
       return {
         ...e,
         label,
         style: {
           ...e.style,
-          stroke: isActive ? "rgb(168 119 255)" : "rgb(168 119 255 / 0.55)",
-          strokeWidth: isActive ? 2.4 : 1.4
+          stroke: isPinned ? EDGE_COLOR_PINNED : EDGE_COLOR,
+          strokeWidth: isPinned ? 2.8 : 1.8
         },
-        labelStyle: {
-          fill: "rgb(232 234 240)",
-          fontSize: 11,
-          fontWeight: 500
-        },
-        labelBgStyle: {
-          fill: "rgb(18 22 33)",
-          fillOpacity: 0.96,
-          stroke: "rgb(168 119 255 / 0.6)"
-        },
-        labelBgPadding: [8, 5] as [number, number],
-        labelBgBorderRadius: 6
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: isPinned ? EDGE_COLOR_PINNED : EDGE_COLOR,
+          width: 18,
+          height: 18
+        }
       };
     });
   }, [baseEdges, actionsByEdge, pinnedEdge]);
@@ -237,8 +396,9 @@ export function StateTransitionPanel({
       <ReactFlow
         nodes={nodes}
         edges={edges}
+        edgeTypes={EDGE_TYPES}
         fitView
-        fitViewOptions={{ padding: 0.2 }}
+        fitViewOptions={{ padding: 0.22 }}
         proOptions={{ hideAttribution: true }}
         nodesDraggable={true}
         nodesConnectable={false}
