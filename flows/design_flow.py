@@ -291,20 +291,30 @@ class SchemaDesignFlow(Flow[DesignState]):
 
     def __init__(self, design_id: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # Initialize state with the provided design_id and enable streaming
-        # so the API can iterate over LLM/task chunks.
         self.state.design_id = design_id
-        self.stream = True
+        # We do NOT set self.stream = True. With stream=True, Flow.kickoff()
+        # returns a FlowStreamingOutput immediately and only runs work as
+        # someone iterates it; our API calls kickoff() synchronously on a
+        # worker thread and ignores the return value, so streaming mode
+        # would mean no work ever runs. SSE updates come from the
+        # crewai_event_bus listener bridge in api/routes/design.py, which
+        # works regardless of streaming mode.
 
     # ------------------------------------------------------------------
     # Phase 1 -- deterministic parse + Louvain clustering
     # ------------------------------------------------------------------
 
-    @start("retry_analyze")
+    @start()
     def parse_and_cluster(self) -> str:
-        """Phase 1: pure Python parse of the uploaded workbook."""
-        # If we already parsed this upload and are looping back from
-        # clarification round, skip re-parsing.
+        """Phase 1: pure Python parse of the uploaded workbook.
+
+        Uses bare ``@start()`` (unconditional) so a fresh ``kickoff()`` runs
+        Phase 1 deterministically. The loop-back-after-clarification case is
+        handled by the early-return below: when the API calls ``kickoff()``
+        again on the same flow, ``parsed_schema`` is already populated, so
+        we skip parsing and emit ``"analyzing"`` to re-trigger Phase 2 with
+        the newly merged clarifications.
+        """
         if self.state.parsed_schema is not None:
             self.state.phase = "analyzing"
             return "analyzing"
@@ -355,9 +365,14 @@ class SchemaDesignFlow(Flow[DesignState]):
     # Phase 2 -- DomainAnalystAgent
     # ------------------------------------------------------------------
 
-    @listen("analyzing")
+    @listen(parse_and_cluster)
     def analyze(self) -> str:
-        """Phase 2: refine cluster names + raise clarifying questions."""
+        """Phase 2: refine cluster names + raise clarifying questions.
+
+        Chained off the completion of ``parse_and_cluster``. ``@listen`` only
+        matches *method names* (or *router return values*); plain return
+        strings from non-router methods do not produce events.
+        """
         if self.state.parsed_schema is None:
             return "rejected"
 
@@ -506,9 +521,14 @@ class SchemaDesignFlow(Flow[DesignState]):
     # Phase 5 -- merge + deterministic validate + critic
     # ------------------------------------------------------------------
 
-    @listen("synthesizing")
+    @listen(design_clusters)
     def synthesize_and_validate(self) -> str:
-        """Phase 5: merge cluster outputs, build layout, validate, critique."""
+        """Phase 5: merge cluster outputs, build layout, validate, critique.
+
+        Chained off the completion of ``design_clusters`` (a non-router); the
+        previous string ``"synthesizing"`` is just a state label, not a flow
+        event.
+        """
         if self.state.parsed_schema is None or self.state.domain_analysis is None:
             self.state.phase = "rejected"
             return "rejected"
