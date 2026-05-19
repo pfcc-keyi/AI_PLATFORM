@@ -109,13 +109,14 @@ export function DesignChat({ designId }: DesignChatProps) {
       <button
         onClick={() => setOpen(!open)}
         className={cn(
-          "fixed bottom-4 left-1/2 z-30 -translate-x-1/2",
-          "inline-flex items-center gap-2 rounded-full border border-border bg-surface/90 px-4 py-2",
-          "text-sm shadow-glow backdrop-blur-sm hover:bg-surfaceAlt"
+          "fixed bottom-4 left-4 z-30",
+          "inline-flex items-center gap-2 rounded-full border border-border bg-surface/90 px-3.5 py-2",
+          "text-xs font-medium tracking-tight shadow-glow backdrop-blur-sm hover:bg-surfaceAlt"
         )}
+        title="Refine with natural language"
       >
-        <Sparkles className="h-4 w-4 text-accent" />
-        {open ? "Close design chat" : "Open design chat"}
+        <Sparkles className="h-3.5 w-3.5 text-accent" />
+        {open ? "Close" : "Refine with chat"}
       </button>
       <AnimatePresence>
         {open ? (
@@ -124,7 +125,7 @@ export function DesignChat({ designId }: DesignChatProps) {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 30, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="fixed bottom-16 left-1/2 z-30 w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 rounded-2xl border border-border bg-surface/95 shadow-glow backdrop-blur"
+            className="fixed bottom-16 left-4 z-30 w-[min(560px,calc(100vw-2rem))] rounded-2xl border border-border bg-surface/95 shadow-glow backdrop-blur"
           >
             <div className="flex items-center justify-between border-b border-border px-4 py-2">
               <div className="flex items-center gap-2 text-sm font-medium">

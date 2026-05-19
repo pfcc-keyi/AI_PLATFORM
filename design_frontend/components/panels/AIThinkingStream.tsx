@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { useEventsStore } from "@/store/eventsStore";
-import { Card } from "@/components/ui/card";
 
 const ICON_FOR: Record<string, React.ComponentType<{ className?: string }>> = {
   flow_started: Workflow,
@@ -73,7 +72,6 @@ function eventLabel(e: Record<string, unknown>): string {
 
 export function AIThinkingStream() {
   const events = useEventsStore((s) => s.events);
-  const phase = useEventsStore((s) => s.phase);
   const recent = React.useMemo(() => events.slice(-30).reverse(), [events]);
 
   // Aggregate llm_chunks into a single growing string for nicer UX.
@@ -90,24 +88,17 @@ export function AIThinkingStream() {
   }, [events]);
 
   return (
-    <Card className="flex max-h-[60vh] w-[340px] flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
-          <Brain className="h-3.5 w-3.5 text-accent" />
-          AI thinking
-        </div>
-        {phase ? (
-          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] text-accent">
-            {phase}
-          </span>
-        ) : null}
-      </div>
+    <div className="flex w-full flex-col gap-2">
       {lastChunkText ? (
-        <div className="border-b border-border bg-bg/40 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted">
+        <div className="rounded-md border border-border/60 bg-bg/40 px-3 py-2 font-mono text-[11px] leading-relaxed text-muted">
           {lastChunkText}
         </div>
-      ) : null}
-      <div className="flex-1 overflow-y-auto px-2 py-2">
+      ) : (
+        <div className="rounded-md border border-dashed border-border/60 px-3 py-3 text-[11px] text-muted">
+          Waiting for AI activity…
+        </div>
+      )}
+      <div className="flex flex-col gap-0.5">
         <AnimatePresence initial={false}>
           {recent.map((e, i) => {
             const Icon = ICON_FOR[(e as { type: string }).type] || CircleDot;
@@ -127,6 +118,6 @@ export function AIThinkingStream() {
           })}
         </AnimatePresence>
       </div>
-    </Card>
+    </div>
   );
 }

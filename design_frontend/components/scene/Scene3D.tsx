@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Canvas } from "@react-three/fiber";
-import { Environment, OrbitControls, Stars } from "@react-three/drei";
+import { OrbitControls, Stars } from "@react-three/drei";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
 import { ClusterHalo } from "./ClusterHalo";
 import { RelationshipEdge3D } from "./RelationshipEdge3D";
@@ -127,87 +127,140 @@ export function Scene3D({
   }
 
   return (
-    <Canvas
-      camera={{ position: [0, 8, 24], fov: 50 }}
-      dpr={[1, 2]}
-      onPointerMissed={onClearSelection}
-    >
-      <color attach="background" args={["#0b0d14"]} />
-      <ambientLight intensity={0.3} />
-      <pointLight position={[10, 10, 10]} intensity={0.8} />
-      <pointLight position={[-10, -10, -10]} intensity={0.4} color="#4fd1ff" />
-      <Stars
-        radius={120}
-        depth={60}
-        count={2200}
-        factor={3}
-        saturation={0}
-        fade
-        speed={0.4}
-      />
-      <Environment preset="night" />
+    <SceneErrorBoundary>
+      <Canvas
+        // Explicit GL options avoid "Cannot read properties of null (reading
+        // 'alpha')" crashes in @react-three/postprocessing v3 when the WebGL
+        // context isn't fully initialized at first paint.
+        gl={{
+          alpha: true,
+          antialias: true,
+          powerPreference: "high-performance",
+          stencil: false,
+          depth: true,
+        }}
+        camera={{ position: [0, 8, 24], fov: 50 }}
+        dpr={[1, 2]}
+        onPointerMissed={onClearSelection}
+      >
+        <color attach="background" args={["#0b0d14"]} />
+        <ambientLight intensity={0.3} />
+        <pointLight position={[10, 10, 10]} intensity={0.8} />
+        <pointLight position={[-10, -10, -10]} intensity={0.4} color="#4fd1ff" />
+        {/* Stars are a tiny shader effect; Environment HDR (~1 MB) was
+            slowing first paint by ~2s on the wire, and our materials don't
+            use reflective PBR maps, so we drop it. */}
+        <React.Suspense fallback={null}>
+          <Stars
+            radius={120}
+            depth={60}
+            count={2200}
+            factor={3}
+            saturation={0}
+            fade
+            speed={0.4}
+          />
+        </React.Suspense>
 
-      {Object.entries(clusterCenters).map(([cid, info]) => (
-        <ClusterHalo
-          key={cid}
-          center={info.center}
-          radius={info.radius}
-          color={clusterColorMap[cid]}
-          active={focusedCluster === cid}
+        {Object.entries(clusterCenters).map(([cid, info]) => (
+          <ClusterHalo
+            key={cid}
+            center={info.center}
+            radius={info.radius}
+            color={clusterColorMap[cid]}
+            active={focusedCluster === cid}
+          />
+        ))}
+
+        {layout.edges.map((edge, i) => {
+          const from = positions[edge.from_table];
+          const to = positions[edge.to_table];
+          if (!from || !to) return null;
+          const dimmed =
+            (selectedTable &&
+              edge.from_table !== selectedTable &&
+              edge.to_table !== selectedTable) ||
+            (focusedCluster &&
+              tableClusterOf[edge.from_table] !== focusedCluster &&
+              tableClusterOf[edge.to_table] !== focusedCluster);
+          const cid = tableClusterOf[edge.from_table];
+          return (
+            <RelationshipEdge3D
+              key={`${edge.from_table}-${edge.to_table}-${i}`}
+              from={from}
+              to={to}
+              color={clusterColorMap[cid] || "#a877ff"}
+              dimmed={Boolean(dimmed)}
+            />
+          );
+        })}
+
+        {layout.tables.map((t) => {
+          const table = tablesByName[t.table_name];
+          if (!table) return null;
+          const cid = t.cluster_id || "c0";
+          return (
+            <TableNode3D
+              key={t.table_name}
+              table={table}
+              position={[t.x, t.y, t.z]}
+              color={clusterColorMap[cid] || "#a877ff"}
+              selected={selectedTable === t.table_name}
+              dimmed={isDimmed(t.table_name)}
+              onSelect={() => onSelectTable(t.table_name)}
+            />
+          );
+        })}
+
+        <OrbitControls
+          enablePan
+          enableZoom
+          enableRotate
+          autoRotate={!selectedTable && !focusedCluster}
+          autoRotateSpeed={0.2}
+          makeDefault
         />
-      ))}
-
-      {layout.edges.map((edge, i) => {
-        const from = positions[edge.from_table];
-        const to = positions[edge.to_table];
-        if (!from || !to) return null;
-        const dimmed =
-          (selectedTable &&
-            edge.from_table !== selectedTable &&
-            edge.to_table !== selectedTable) ||
-          (focusedCluster &&
-            tableClusterOf[edge.from_table] !== focusedCluster &&
-            tableClusterOf[edge.to_table] !== focusedCluster);
-        const cid = tableClusterOf[edge.from_table];
-        return (
-          <RelationshipEdge3D
-            key={`${edge.from_table}-${edge.to_table}-${i}`}
-            from={from}
-            to={to}
-            color={clusterColorMap[cid] || "#a877ff"}
-            dimmed={Boolean(dimmed)}
-          />
-        );
-      })}
-
-      {layout.tables.map((t) => {
-        const table = tablesByName[t.table_name];
-        if (!table) return null;
-        const cid = t.cluster_id || "c0";
-        return (
-          <TableNode3D
-            key={t.table_name}
-            table={table}
-            position={[t.x, t.y, t.z]}
-            color={clusterColorMap[cid] || "#a877ff"}
-            selected={selectedTable === t.table_name}
-            dimmed={isDimmed(t.table_name)}
-            onSelect={() => onSelectTable(t.table_name)}
-          />
-        );
-      })}
-
-      <OrbitControls
-        enablePan
-        enableZoom
-        enableRotate
-        autoRotate={!selectedTable && !focusedCluster}
-        autoRotateSpeed={0.2}
-        makeDefault
-      />
-      <EffectComposer>
-        <Bloom intensity={0.85} luminanceThreshold={0.2} mipmapBlur />
-      </EffectComposer>
-    </Canvas>
+        <React.Suspense fallback={null}>
+          <EffectComposer multisampling={0}>
+            <Bloom intensity={0.85} luminanceThreshold={0.2} mipmapBlur />
+          </EffectComposer>
+        </React.Suspense>
+      </Canvas>
+    </SceneErrorBoundary>
   );
+}
+
+// Local error boundary so a Three.js / WebGL crash doesn't take down the
+// whole design page. Falls back to a quiet placeholder + a button to reset.
+class SceneErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; error?: unknown }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(error: unknown) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: unknown) {
+    // eslint-disable-next-line no-console
+    console.warn("Scene3D crashed:", error);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-3 text-muted">
+          <div className="text-sm">3D scene failed to render.</div>
+          <button
+            className="rounded-full border border-border bg-surface/80 px-3 py-1 text-xs hover:bg-surfaceAlt"
+            onClick={() => this.setState({ hasError: false, error: undefined })}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }

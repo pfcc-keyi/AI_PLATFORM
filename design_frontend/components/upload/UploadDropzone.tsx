@@ -56,30 +56,28 @@ export function UploadDropzone() {
           {...getRootProps()}
           className={cn(
             "group cursor-pointer rounded-2xl border-2 border-dashed bg-surface/40 backdrop-blur-sm",
-            "p-12 text-center transition-colors",
+            "px-12 py-14 text-center transition-colors",
             isDragActive
               ? "border-accent bg-accent/10"
               : "border-border hover:border-accent/60 hover:bg-surface/60"
           )}
         >
           <input {...getInputProps()} />
-          <div className="mx-auto flex flex-col items-center gap-4">
+          <div className="mx-auto flex flex-col items-center gap-3">
             {busy ? (
-              <Loader2 className="h-12 w-12 animate-spin text-accent" />
+              <Loader2 className="h-10 w-10 animate-spin text-accent" />
             ) : (
-              <CloudUpload className="h-12 w-12 text-accent" />
+              <CloudUpload className="h-10 w-10 text-accent" />
             )}
-            <div className="text-lg font-medium">
+            <div className="text-lg font-medium tracking-tight">
               {busy
-                ? "Uploading and parsing your schema..."
+                ? "Parsing your schema…"
                 : isDragActive
-                  ? "Drop your .xlsx here"
-                  : "Drop an Excel schema dictionary"}
+                  ? "Drop to upload"
+                  : "Drop an Excel schema (.xlsx)"}
             </div>
-            <div className="text-sm text-muted max-w-md">
-              Multi-sheet workbooks are supported. The AI cockpit parses tables,
-              clusters them by FK graph, asks clarifying questions, then renders
-              a 3D ERD with per-table state machines.
+            <div className="text-xs text-muted">
+              {busy ? "Hang tight." : "or click to browse"}
             </div>
           </div>
         </div>

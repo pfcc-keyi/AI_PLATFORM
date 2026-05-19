@@ -1,5 +1,6 @@
 "use client";
 
+import * as React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import Link from "next/link";
@@ -8,6 +9,18 @@ import { listDesigns } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { formatRelativeTime } from "@/lib/utils";
+
+// Time strings depend on Date.now(), which differs between SSR and client.
+// Defer rendering until after mount to avoid hydration mismatch.
+function RelativeTime({ iso }: { iso: string | undefined }) {
+  const [text, setText] = React.useState("");
+  React.useEffect(() => {
+    setText(formatRelativeTime(iso));
+    const t = setInterval(() => setText(formatRelativeTime(iso)), 60_000);
+    return () => clearInterval(t);
+  }, [iso]);
+  return <span suppressHydrationWarning>{text}</span>;
+}
 
 export function DesignList() {
   const { data, isLoading, error } = useQuery({
@@ -68,7 +81,7 @@ export function DesignList() {
                 </Badge>
               </div>
               <div className="mt-auto text-xs text-muted">
-                {formatRelativeTime(d.created_at)}
+                <RelativeTime iso={d.created_at} />
               </div>
             </Card>
           </Link>

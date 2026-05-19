@@ -802,6 +802,29 @@ class SchemaDesignFlow(Flow[DesignState]):
             return {"phase": "refining", "feedback": feedback}
         return {"phase": self.state.phase, "error": f"unknown action '{action}'"}
 
+    def _ensure_full_design(self) -> Optional[FullDesign]:
+        """Return ``state.full_design``, hydrating from disk if the in-memory
+        flow object was created fresh (e.g. after a backend restart) and
+        never ran Phase 5 itself.
+
+        Without this, every on-demand method (refine, critique, suggest
+        handlers, apply user edit) silently fails with "no full_design" even
+        though the design is sitting right there on disk.
+        """
+        if self.state.full_design is not None:
+            return self.state.full_design
+        loaded = design_store.load_design(self.state.design_id)
+        if loaded is None:
+            return None
+        self.state.full_design = loaded
+        if loaded.parsed_schema and not self.state.parsed_schema:
+            self.state.parsed_schema = loaded.parsed_schema
+        if loaded.domain_analysis and not self.state.domain_analysis:
+            self.state.domain_analysis = loaded.domain_analysis
+        if not self.state.phase or self.state.phase in {"parsing", "analyzing"}:
+            self.state.phase = "ready"
+        return loaded
+
     def refine(
         self,
         scope: str,
@@ -814,10 +837,11 @@ class SchemaDesignFlow(Flow[DesignState]):
         ``storage/design_store.append_revision``. The canonical design is NOT
         mutated -- the API ``/revisions/{id}/apply`` endpoint does that.
         """
-        if self.state.full_design is None:
+        full = self._ensure_full_design()
+        if full is None:
             return None
-        before = self.state.full_design.model_copy(deep=True)
-        current_json = self.state.full_design.model_dump_json(indent=2)
+        before = full.model_copy(deep=True)
+        current_json = full.model_dump_json(indent=2)
 
         crew = make_refinement_crew(
             user_request=request,
@@ -900,9 +924,10 @@ class SchemaDesignFlow(Flow[DesignState]):
         change_summary: str,
     ) -> DesignRevision:
         """Manual UI edit path -- no LLM. Same revision pipeline."""
-        if self.state.full_design is None:
+        full = self._ensure_full_design()
+        if full is None:
             raise RuntimeError("no canonical design to edit")
-        before = self.state.full_design.model_copy(deep=True)
+        before = full.model_copy(deep=True)
         after.design_id = self.state.design_id
         revision = DesignRevision(
             revision_id=_short_id("usr-"),
@@ -936,10 +961,11 @@ class SchemaDesignFlow(Flow[DesignState]):
         if cache_key in self.state.handler_cache:
             return self.state.handler_cache[cache_key]
 
+        full = self._ensure_full_design()
         table_context_json = "{}"
-        if self.state.full_design is not None:
+        if full is not None:
             target = next(
-                (sd for sd in self.state.full_design.schema_designs if sd.table_name == table),
+                (sd for sd in full.schema_designs if sd.table_name == table),
                 None,
             )
             if target is not None:
@@ -964,10 +990,11 @@ class SchemaDesignFlow(Flow[DesignState]):
 
     def critique(self, scope: str = "global") -> Optional[DesignCritique]:
         """Re-run the deterministic validator + DesignCriticAgent."""
-        if self.state.full_design is None:
+        full = self._ensure_full_design()
+        if full is None:
             return None
-        issues = _deterministic_validate(self.state.full_design)
-        critique = _run_critic(self.state.full_design, issues)
+        issues = _deterministic_validate(full)
+        critique = _run_critic(full, issues)
         if critique is None:
             critique = DesignCritique(summary="No semantic issues found.", issues=issues)
         else:

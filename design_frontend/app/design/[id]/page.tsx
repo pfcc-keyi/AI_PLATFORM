@@ -4,43 +4,101 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { useQuery } from "@tanstack/react-query";
 import {
+  Activity,
   ArrowLeft,
+  CheckCircle2,
+  ChevronLeft,
   ChevronRight,
-  Database,
-  ListTree,
+  Compass,
+  Layers3,
   Loader2,
-  Network,
+  Map as MapIcon,
+  RefreshCw,
+  RotateCcw,
+  Sparkles,
   Trash2,
-  RefreshCw
+  TriangleAlert,
+  XCircle
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import { motion, AnimatePresence } from "framer-motion";
 import { QueryProvider } from "@/components/QueryProvider";
 import { Button } from "@/components/ui/button";
-import { Card, CardBody, CardHeader } from "@/components/ui/card";
-import { Sheet } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
-import { getDesign, deleteDesign, critiqueDesign } from "@/lib/api";
+import {
+  critiqueDesign,
+  deleteDesign,
+  getDesign,
+  reviewDesign
+} from "@/lib/api";
 import { useDesignStore } from "@/store/designStore";
 import { useEventsStore } from "@/store/eventsStore";
 import { useDesignStream } from "@/lib/sse";
 import { fallbackLayout } from "@/lib/layout3d";
+import { cn } from "@/lib/utils";
 import { TableInspector } from "@/components/panels/TableInspector";
 import { FieldInspector } from "@/components/panels/FieldInspector";
 import { AIThinkingStream } from "@/components/panels/AIThinkingStream";
 import { AssumptionDrawer } from "@/components/panels/AssumptionDrawer";
-import { ConfidenceLegend } from "@/components/panels/ConfidenceLegend";
 import { DesignDiffPanel } from "@/components/panels/DesignDiffPanel";
 import { ClarificationCard } from "@/components/panels/ClarificationCard";
-import { ReviewBar } from "@/components/panels/ReviewBar";
 import { DesignChat } from "@/components/chat/DesignChat";
 import { MiniMap } from "@/components/scene/MiniMap";
 
-// R3F must run client-only.
+// R3F must run client-only. The dynamic `loading` prop covers chunk-fetch
+// time; once the chunk lands, Scene3D itself still needs a beat to init the
+// WebGL context + download the night HDR, so the Canvas may stay blank for
+// a moment. The shimmer below is rendered until React swaps in the real
+// Scene3D component.
 const Scene3D = dynamic(
   () => import("@/components/scene/Scene3D").then((m) => m.Scene3D),
-  { ssr: false }
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full w-full items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-muted">
+          <Loader2 className="h-6 w-6 animate-spin text-accent" />
+          <div className="text-sm">Composing 3D scene…</div>
+        </div>
+      </div>
+    )
+  }
 );
+
+type RailTab = "activity" | "domain" | "critique" | "revisions";
+
+const RAIL_TABS: { id: RailTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+  { id: "activity", label: "Activity", icon: Activity },
+  { id: "domain", label: "Domain", icon: Compass },
+  { id: "critique", label: "Critique", icon: TriangleAlert },
+  { id: "revisions", label: "Revisions", icon: Sparkles }
+];
+
+function PhaseChip({ phase }: { phase: string }) {
+  if (!phase) return null;
+  const palette: Record<string, string> = {
+    parsing: "bg-muted/15 text-muted",
+    analyzing: "bg-accentAlt/15 text-accentAlt",
+    awaiting_clarification: "bg-warning/15 text-warning animate-pulseGlow",
+    designing: "bg-accent/15 text-accent",
+    synthesizing: "bg-accent/15 text-accent",
+    awaiting_review: "bg-success/15 text-success",
+    ready: "bg-success/15 text-success",
+    rejected: "bg-danger/15 text-danger"
+  };
+  const label = phase.replace(/_/g, " ");
+  return (
+    <span
+      className={cn(
+        "rounded-full px-2.5 py-0.5 text-[11px] font-medium tracking-tight",
+        palette[phase] ?? "bg-muted/15 text-muted"
+      )}
+    >
+      {label}
+    </span>
+  );
+}
 
 function DesignPageInner({ designId }: { designId: string }) {
   const router = useRouter();
@@ -57,8 +115,13 @@ function DesignPageInner({ designId }: { designId: string }) {
   const setSelection = useDesignStore((s) => s.setSelection);
   const focusedCluster = useDesignStore((s) => s.focusedCluster);
   const setFocusedCluster = useDesignStore((s) => s.setFocusedCluster);
+  const pendingRevisions = useDesignStore((s) => s.pendingRevisions);
   const phaseEvt = useEventsStore((s) => s.phase);
   const clearEvents = useEventsStore((s) => s.clear);
+
+  const [leftOpen, setLeftOpen] = React.useState(true);
+  const [rightTab, setRightTab] = React.useState<RailTab>("activity");
+  const [reviewBusy, setReviewBusy] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     setDesignId(designId);
@@ -69,16 +132,21 @@ function DesignPageInner({ designId }: { designId: string }) {
       setSelection({ kind: "none" });
       setFocusedCluster(undefined);
     };
-  }, [designId, setDesignId, setDesign, setQuestions, setSelection, setFocusedCluster, clearEvents]);
+  }, [
+    designId,
+    setDesignId,
+    setDesign,
+    setQuestions,
+    setSelection,
+    setFocusedCluster,
+    clearEvents
+  ]);
 
   const { data: queryData, isLoading, error, refetch } = useQuery({
     queryKey: ["design", designId],
     queryFn: () => getDesign(designId),
     refetchOnWindowFocus: false,
     retry: (failureCount, err) => {
-      // A 404 means the design genuinely isn't on this backend (e.g. the
-      // service was rebuilt and lost in-memory state). Retrying just causes
-      // the UI to flicker between "Loading" and the error banner.
       if (err instanceof Error && /^404\b/.test(err.message)) return false;
       return failureCount < 1;
     },
@@ -90,7 +158,6 @@ function DesignPageInner({ designId }: { designId: string }) {
     }
   });
 
-  // Push server state into Zustand whenever the query refreshes.
   React.useEffect(() => {
     if (!queryData) return;
     if ((queryData as { design?: unknown }).design) {
@@ -117,6 +184,20 @@ function DesignPageInner({ designId }: { designId: string }) {
     return design.schema_designs.find((sd) => sd.table_name === selectedTableName);
   }, [design, selectedTableName]);
 
+  // Auto-switch right rail when interesting things happen.
+  React.useEffect(() => {
+    if (selection.kind !== "none") return;
+    if (phase === "designing" || phase === "synthesizing" || phase === "analyzing" || phase === "parsing") {
+      setRightTab("activity");
+    } else if (phase === "awaiting_review" || phase === "ready") {
+      if (design?.critique && (design.critique.issues?.length ?? 0) > 0) {
+        setRightTab("critique");
+      } else {
+        setRightTab("domain");
+      }
+    }
+  }, [phase, selection.kind, design]);
+
   async function handleDelete() {
     if (!confirm("Delete this design? This cannot be undone.")) return;
     await deleteDesign(designId);
@@ -133,11 +214,21 @@ function DesignPageInner({ designId }: { designId: string }) {
     }
   }
 
+  async function handleReview(action: "approved" | "revise" | "reject") {
+    setReviewBusy(action);
+    try {
+      await reviewDesign(designId, action);
+      refetch();
+    } finally {
+      setReviewBusy(null);
+    }
+  }
+
   if (isLoading && !design) {
     return (
       <div className="flex h-screen items-center justify-center text-muted">
         <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-        Loading design...
+        Loading design…
       </div>
     );
   }
@@ -154,9 +245,8 @@ function DesignPageInner({ designId }: { designId: string }) {
                 This design isn&apos;t on the backend.
               </div>
               <div className="mt-2 text-sm text-danger/90">
-                The backend service may have restarted (which clears the
-                in-memory session) before the design finished and was
-                persisted. Please go back and upload again.
+                The backend service may have restarted before the design
+                finished and was persisted. Please go back and upload again.
               </div>
             </>
           ) : (
@@ -175,9 +265,15 @@ function DesignPageInner({ designId }: { designId: string }) {
     );
   }
 
+  const showClarification =
+    phase === "awaiting_clarification" && questions.length > 0;
+  const tableCount = design?.schema_designs.length ?? 0;
+  const clusters = design?.domain_analysis?.clusters ?? [];
+  const inspectorOpen = selection.kind !== "none" && !!selectedTable;
+
   return (
     <div className="relative h-screen w-screen overflow-hidden">
-      {/* 3D scene fills the whole viewport */}
+      {/* 3D scene */}
       <div className="absolute inset-0">
         {design ? (
           <Scene3D
@@ -191,87 +287,277 @@ function DesignPageInner({ designId }: { designId: string }) {
             onClearSelection={() => setSelection({ kind: "none" })}
           />
         ) : (
-          <div className="flex h-full items-center justify-center text-muted">
-            <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-            Waiting for AI to generate the design...
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-muted">
+            <Loader2 className="h-6 w-6 animate-spin text-accent" />
+            <div className="text-sm">Generating your design…</div>
           </div>
         )}
       </div>
 
-      {/* Top header bar */}
-      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between p-4">
-        <div className="pointer-events-auto flex items-center gap-3 rounded-full border border-border bg-surface/80 px-4 py-1.5 text-sm backdrop-blur">
-          <Link href="/" className="text-muted hover:text-text">
+      {/* Top bar */}
+      <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-4 p-4">
+        <div className="pointer-events-auto flex items-center gap-3 rounded-full border border-border bg-surface/80 px-3 py-1.5 backdrop-blur">
+          <Link
+            href="/"
+            className="flex h-6 w-6 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
+          >
             <ArrowLeft className="h-4 w-4" />
           </Link>
-          <Database className="h-4 w-4 text-accent" />
-          <span className="font-medium">{design?.domain_analysis?.domain_guess || "Schema design"}</span>
+          <span className="text-sm font-medium tracking-tight">
+            {design?.domain_analysis?.domain_guess ?? "Schema design"}
+          </span>
           {design ? (
-            <Badge variant="muted">
-              {design.schema_designs.length} tables
-            </Badge>
+            <span className="text-[11px] text-muted">· {tableCount} tables</span>
           ) : null}
-          {phase ? (
-            <Badge variant="accent">{phase}</Badge>
-          ) : null}
-          {design?.critique ? (
-            <ConfidenceLegend issues={design.critique.issues} />
-          ) : null}
+          <PhaseChip phase={phase} />
         </div>
+
         <div className="pointer-events-auto flex items-center gap-2">
-          <Button size="sm" variant="secondary" onClick={handleRecritique}>
+          {phase === "awaiting_review" || phase === "ready" ? (
+            <>
+              <Button
+                size="sm"
+                onClick={() => handleReview("approved")}
+                disabled={reviewBusy !== null}
+              >
+                {reviewBusy === "approved" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4" />
+                )}
+                Approve
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => handleReview("revise")}
+                disabled={reviewBusy !== null}
+              >
+                {reviewBusy === "revise" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4" />
+                )}
+                Revise
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => handleReview("reject")}
+                disabled={reviewBusy !== null}
+              >
+                {reviewBusy === "reject" ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <XCircle className="h-4 w-4" />
+                )}
+                Reject
+              </Button>
+            </>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={handleRecritique} title="Re-run critic">
             <RefreshCw className="h-4 w-4" />
-            Re-critique
           </Button>
-          <Button size="sm" variant="ghost" onClick={handleDelete}>
+          <Button size="sm" variant="ghost" onClick={handleDelete} title="Delete design">
             <Trash2 className="h-4 w-4" />
           </Button>
         </div>
       </header>
 
-      {/* Left side: cluster filter */}
-      {design && design.domain_analysis.clusters.length > 0 ? (
-        <aside className="pointer-events-auto absolute left-4 top-1/2 z-10 max-h-[60vh] w-[220px] -translate-y-1/2 overflow-y-auto">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
-                <ListTree className="h-3.5 w-3.5 text-accent" />
-                Clusters
-              </div>
-            </CardHeader>
-            <CardBody className="flex flex-col gap-1">
+      {/* Left rail: clusters */}
+      <aside
+        className={cn(
+          "pointer-events-auto absolute left-4 top-20 z-10 flex flex-col gap-2 rounded-2xl border border-border bg-surface/80 backdrop-blur",
+          leftOpen ? "w-[220px] p-3" : "w-12 items-center p-2"
+        )}
+        style={{ maxHeight: "calc(100vh - 6rem - 1rem)" }}
+      >
+        <button
+          className="ml-auto flex h-6 w-6 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
+          onClick={() => setLeftOpen((o) => !o)}
+          title={leftOpen ? "Collapse" : "Expand"}
+        >
+          <ChevronLeft
+            className={cn("h-3.5 w-3.5 transition", !leftOpen && "rotate-180")}
+          />
+        </button>
+        {leftOpen ? (
+          <>
+            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">
+              <Layers3 className="h-3 w-3 text-accent" />
+              Clusters
+            </div>
+            <div className="flex flex-col gap-0.5 overflow-y-auto pr-1">
               <button
-                className="rounded-md px-2 py-1 text-left text-xs text-muted hover:bg-surfaceAlt"
+                className={cn(
+                  "rounded-md px-2 py-1 text-left text-xs hover:bg-surfaceAlt",
+                  !focusedCluster && "bg-accent/15 text-accent"
+                )}
                 onClick={() => setFocusedCluster(undefined)}
               >
-                All clusters
+                All{" "}
+                <span className="text-[10px] text-muted">
+                  · {clusters.length} clusters / {tableCount} tables
+                </span>
               </button>
-              {design.domain_analysis.clusters.map((c) => (
+              {clusters.map((c) => (
                 <button
                   key={c.cluster_id}
-                  className={`rounded-md px-2 py-1 text-left text-xs hover:bg-surfaceAlt ${
-                    focusedCluster === c.cluster_id ? "bg-accent/15 text-accent" : ""
-                  }`}
+                  className={cn(
+                    "rounded-md px-2 py-1 text-left text-xs hover:bg-surfaceAlt",
+                    focusedCluster === c.cluster_id &&
+                      "bg-accent/15 text-accent"
+                  )}
                   onClick={() => setFocusedCluster(c.cluster_id)}
                   title={c.rationale}
                 >
-                  {c.name || c.cluster_id}{" "}
+                  <span className="block truncate">
+                    {c.name || c.cluster_id}
+                  </span>
                   <span className="text-[10px] text-muted">
-                    ({c.table_names.length})
+                    {c.table_names.length} tables
                   </span>
                 </button>
               ))}
-            </CardBody>
-          </Card>
-        </aside>
-      ) : null}
+              {clusters.length === 0 ? (
+                <div className="px-2 py-1 text-[11px] text-muted">
+                  No clusters yet.
+                </div>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <Layers3 className="mt-1 h-4 w-4 text-accent" />
+        )}
+      </aside>
 
-      {/* Top-right thinking stream */}
-      <div className="pointer-events-auto absolute right-4 top-20 z-10">
-        <AIThinkingStream />
-      </div>
+      {/* Right rail: contextual (tabs OR table/field inspector) */}
+      <aside
+        className="pointer-events-auto absolute right-4 top-20 z-10 flex w-[380px] flex-col overflow-hidden rounded-2xl border border-border bg-surface/85 backdrop-blur"
+        style={{ maxHeight: "calc(100vh - 6rem - 1rem)" }}
+      >
+        {inspectorOpen ? (
+          <>
+            <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+              <button
+                className="flex h-6 w-6 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
+                onClick={() =>
+                  setSelection(
+                    selection.kind === "field" && selectedTable
+                      ? { kind: "table", tableName: selectedTable.table_name }
+                      : { kind: "none" }
+                  )
+                }
+                title="Back"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+              <div className="text-xs uppercase tracking-wider text-muted">
+                {selection.kind === "field" ? "Field" : "Table"}
+              </div>
+              <span className="font-mono text-sm">
+                {selection.kind === "field"
+                  ? `${selection.tableName}.${selection.fieldName}`
+                  : selectedTable?.table_name}
+              </span>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {selection.kind === "field" && selectedTable ? (
+                <FieldInspector
+                  designId={designId}
+                  table={selectedTable}
+                  fieldName={selection.fieldName}
+                  initialState={selection.stateName}
+                />
+              ) : selectedTable ? (
+                <TableInspector
+                  table={selectedTable}
+                  onSelectField={(fieldName) =>
+                    setSelection({
+                      kind: "field",
+                      tableName: selectedTable.table_name,
+                      fieldName,
+                      stateName: selectedTable.states[0]
+                    })
+                  }
+                />
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex gap-0 border-b border-border">
+              {RAIL_TABS.map((t) => {
+                const Icon = t.icon;
+                const active = rightTab === t.id;
+                const badgeCount =
+                  t.id === "critique"
+                    ? design?.critique?.issues?.length ?? 0
+                    : t.id === "revisions"
+                      ? pendingRevisions.length
+                      : 0;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => setRightTab(t.id)}
+                    className={cn(
+                      "flex flex-1 items-center justify-center gap-1.5 border-b-2 px-2 py-2 text-[11px] font-medium tracking-wide transition",
+                      active
+                        ? "border-accent text-text"
+                        : "border-transparent text-muted hover:text-text"
+                    )}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                    {t.label}
+                    {badgeCount > 0 ? (
+                      <span
+                        className={cn(
+                          "rounded-full px-1.5 text-[10px]",
+                          active
+                            ? "bg-accent/20 text-accent"
+                            : "bg-muted/20 text-muted"
+                        )}
+                      >
+                        {badgeCount}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {rightTab === "activity" ? (
+                <div className="p-2">
+                  <AIThinkingStream />
+                </div>
+              ) : null}
+              {rightTab === "domain" ? (
+                <div className="p-3">
+                  <AssumptionDrawer
+                    domain={design?.domain_analysis}
+                    critique={undefined}
+                  />
+                </div>
+              ) : null}
+              {rightTab === "critique" ? (
+                <div className="p-3">
+                  <AssumptionDrawer
+                    domain={undefined}
+                    critique={design?.critique ?? undefined}
+                  />
+                </div>
+              ) : null}
+              {rightTab === "revisions" ? (
+                <div className="p-3">
+                  <DesignDiffPanel designId={designId} />
+                </div>
+              ) : null}
+            </div>
+          </>
+        )}
+      </aside>
 
-      {/* Bottom-right mini map */}
+      {/* Mini-map */}
       {design ? (
         <div className="pointer-events-auto absolute bottom-4 right-4 z-10">
           <MiniMap
@@ -282,99 +568,34 @@ function DesignPageInner({ designId }: { designId: string }) {
         </div>
       ) : null}
 
-      {/* Bottom-left review + assumption stack */}
-      <div className="pointer-events-auto absolute bottom-4 left-4 z-10 flex max-h-[70vh] w-[360px] flex-col gap-3 overflow-y-auto">
-        {phase === "awaiting_clarification" && questions.length ? (
-          <ClarificationCard
-            designId={designId}
-            questions={questions}
-            round={round}
-          />
-        ) : null}
-        <ReviewBar designId={designId} phase={phase} />
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted">
-              <Network className="h-3.5 w-3.5 text-accent" />
-              Pending revisions
-            </div>
-          </CardHeader>
-          <CardBody>
-            <DesignDiffPanel designId={designId} />
-          </CardBody>
-        </Card>
-        <AssumptionDrawer
-          domain={design?.domain_analysis}
-          critique={design?.critique}
-        />
-      </div>
-
-      {/* Right side inspector */}
-      <Sheet
-        open={selection.kind === "table"}
-        onOpenChange={(o) => !o && setSelection({ kind: "none" })}
-        title={
-          selectedTable ? (
-            <span className="flex items-center gap-2">
-              <span>Table</span>
-              <ChevronRight className="h-3 w-3 text-muted" />
-              <code>{selectedTable.table_name}</code>
-            </span>
-          ) : (
-            "Table"
-          )
-        }
-      >
-        {selectedTable ? (
-          <TableInspector
-            table={selectedTable}
-            onSelectField={(fieldName) =>
-              setSelection({
-                kind: "field",
-                tableName: selectedTable.table_name,
-                fieldName,
-                stateName: selectedTable.states[0]
-              })
-            }
-          />
-        ) : null}
-      </Sheet>
-
-      <Sheet
-        open={selection.kind === "field"}
-        onOpenChange={(o) =>
-          !o &&
-          setSelection(
-            selectedTable
-              ? { kind: "table", tableName: selectedTable.table_name }
-              : { kind: "none" }
-          )
-        }
-        title={
-          selection.kind === "field" ? (
-            <span className="flex items-center gap-2">
-              <span>Field</span>
-              <ChevronRight className="h-3 w-3 text-muted" />
-              <code>
-                {selection.tableName}.{selection.fieldName}
-              </code>
-            </span>
-          ) : (
-            "Field"
-          )
-        }
-      >
-        {selection.kind === "field" && selectedTable ? (
-          <FieldInspector
-            designId={designId}
-            table={selectedTable}
-            fieldName={selection.fieldName}
-            initialState={selection.stateName}
-          />
-        ) : null}
-      </Sheet>
-
+      {/* Floating chat (bottom-left so it doesn't fight the minimap) */}
       <DesignChat designId={designId} />
+
+      {/* Clarification modal — centered, impossible to miss */}
+      <AnimatePresence>
+        {showClarification ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-30 flex items-center justify-center bg-bg/60 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.96, opacity: 0, y: 8 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.96, opacity: 0, y: 8 }}
+              transition={{ duration: 0.2, ease: "easeOut" }}
+              className="w-[min(640px,calc(100vw-2rem))]"
+            >
+              <ClarificationCard
+                designId={designId}
+                questions={questions}
+                round={round}
+              />
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }
