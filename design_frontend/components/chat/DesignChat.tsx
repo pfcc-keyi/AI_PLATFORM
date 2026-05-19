@@ -109,8 +109,7 @@ export function DesignChat({ designId }: DesignChatProps) {
       <button
         onClick={() => setOpen(!open)}
         className={cn(
-          "fixed bottom-4 left-4 z-30",
-          "inline-flex items-center gap-2 rounded-full border border-border bg-surface/90 px-3.5 py-2",
+          "inline-flex h-9 items-center gap-2 rounded-full border border-border bg-surface/90 px-3.5",
           "text-xs font-medium tracking-tight shadow-glow backdrop-blur-sm hover:bg-surfaceAlt"
         )}
         title="Refine with natural language"
@@ -125,7 +124,7 @@ export function DesignChat({ designId }: DesignChatProps) {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 30, opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="fixed bottom-16 left-4 z-30 w-[min(560px,calc(100vw-2rem))] rounded-2xl border border-border bg-surface/95 shadow-glow backdrop-blur"
+            className="fixed bottom-[6.5rem] left-4 z-30 w-[min(560px,calc(100vw-2rem))] rounded-2xl border border-border bg-surface/95 shadow-glow backdrop-blur"
           >
             <div className="flex items-center justify-between border-b border-border px-4 py-2">
               <div className="flex items-center gap-2 text-sm font-medium">

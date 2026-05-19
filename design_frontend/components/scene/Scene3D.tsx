@@ -1,9 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { OrbitControls, Stars } from "@react-three/drei";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
+import type {
+  OrbitControls as OrbitControlsImpl
+} from "three-stdlib";
+import type { PerspectiveCamera } from "three";
+import { Vector3 } from "three";
 import { ClusterHalo } from "./ClusterHalo";
 import { RelationshipEdge3D } from "./RelationshipEdge3D";
 import { TableNode3D } from "./TableNode3D";
@@ -16,14 +21,18 @@ interface Scene3DProps {
   focusedCluster?: string;
   onSelectTable: (tableName: string) => void;
   onClearSelection: () => void;
+  /** Bumped by parent to ask the camera to recompute its framing. */
+  focusToken?: number;
+  /** Imperative request to reset the camera to the home pose. */
+  resetToken?: number;
 }
 
 const CLUSTER_PALETTE = [
-  "#a877ff", // accent
-  "#4fd1ff", // accent alt
-  "#5cdaa2", // success
-  "#fcc46e", // warning
-  "#f6607a", // danger
+  "#a877ff",
+  "#4fd1ff",
+  "#5cdaa2",
+  "#fcc46e",
+  "#f6607a",
   "#7c5cff",
   "#36c2ff",
   "#ff8bd0",
@@ -31,9 +40,113 @@ const CLUSTER_PALETTE = [
   "#ffd178"
 ];
 
-function clusterColor(clusterId: string | undefined, idx: number): string {
+function clusterColor(_clusterId: string | undefined, idx: number): string {
   const i = idx % CLUSTER_PALETTE.length;
   return CLUSTER_PALETTE[i];
+}
+
+/**
+ * Smoothly lerps the camera position + orbit target toward a new framing.
+ *
+ * - On `selectedTable` change: zoom in on the table, keep current viewing
+ *   angle but pull closer.
+ * - On `focusedCluster` change: frame the whole cluster, pulling back enough
+ *   for the bounding sphere to fit.
+ * - On `resetToken` change: snap (via lerp) back to the wide home pose so the
+ *   whole graph is visible.
+ *
+ * Uses requestAnimationFrame loop locally instead of useFrame so we can
+ * register the animation only when needed and stop once the camera arrives.
+ */
+function CameraController({
+  selectedTable,
+  focusedCluster,
+  positions,
+  clusterCenters,
+  resetToken,
+  focusToken
+}: {
+  selectedTable?: string;
+  focusedCluster?: string;
+  positions: Record<string, [number, number, number]>;
+  clusterCenters: Record<
+    string,
+    { center: [number, number, number]; radius: number }
+  >;
+  resetToken?: number;
+  focusToken?: number;
+}) {
+  const { camera, controls } = useThree() as unknown as {
+    camera: PerspectiveCamera;
+    controls: OrbitControlsImpl | null;
+  };
+
+  const targetPos = React.useRef(new Vector3());
+  const targetLook = React.useRef(new Vector3());
+  const tweening = React.useRef(false);
+  const homePose = React.useMemo(
+    () => ({ pos: new Vector3(0, 8, 24), look: new Vector3(0, 0, 0) }),
+    []
+  );
+
+  React.useEffect(() => {
+    // Decide the next target framing whenever inputs change.
+    let pos = homePose.pos.clone();
+    let look = homePose.look.clone();
+
+    if (selectedTable && positions[selectedTable]) {
+      const [tx, ty, tz] = positions[selectedTable];
+      look.set(tx, ty, tz);
+      // Approach from the camera's current direction so users don't get
+      // disoriented; just move closer along that vector.
+      const dir = new Vector3()
+        .subVectors(camera.position, look)
+        .normalize()
+        .multiplyScalar(6.5); // distance from the node
+      pos.copy(look).add(dir);
+    } else if (focusedCluster && clusterCenters[focusedCluster]) {
+      const c = clusterCenters[focusedCluster];
+      look.set(c.center[0], c.center[1], c.center[2]);
+      const dist = Math.max(10, c.radius * 4.2);
+      const dir = new Vector3()
+        .subVectors(camera.position, look)
+        .normalize()
+        .multiplyScalar(dist);
+      pos.copy(look).add(dir);
+    }
+
+    targetPos.current.copy(pos);
+    targetLook.current.copy(look);
+    tweening.current = true;
+    // we don't depend on `camera` so resets/focuses don't re-arm constantly
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTable, focusedCluster, resetToken, focusToken]);
+
+  React.useEffect(() => {
+    let raf = 0;
+    function tick() {
+      if (tweening.current) {
+        // Smoothly approach the targets.
+        camera.position.lerp(targetPos.current, 0.12);
+        if (controls) {
+          (controls.target as Vector3).lerp(targetLook.current, 0.14);
+          controls.update();
+        }
+        const posDelta = camera.position.distanceTo(targetPos.current);
+        const lookDelta = controls
+          ? (controls.target as Vector3).distanceTo(targetLook.current)
+          : 0;
+        if (posDelta < 0.05 && lookDelta < 0.05) {
+          tweening.current = false;
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    }
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [camera, controls]);
+
+  return null;
 }
 
 export function Scene3D({
@@ -42,7 +155,9 @@ export function Scene3D({
   selectedTable,
   focusedCluster,
   onSelectTable,
-  onClearSelection
+  onClearSelection,
+  focusToken,
+  resetToken
 }: Scene3DProps) {
   const positions: Record<string, [number, number, number]> = React.useMemo(() => {
     const out: Record<string, [number, number, number]> = {};
@@ -137,28 +252,26 @@ export function Scene3D({
           antialias: true,
           powerPreference: "high-performance",
           stencil: false,
-          depth: true,
+          depth: true
         }}
-        camera={{ position: [0, 8, 24], fov: 50 }}
+        camera={{ position: [0, 8, 24], fov: 50, near: 0.1, far: 400 }}
         dpr={[1, 2]}
         onPointerMissed={onClearSelection}
       >
         <color attach="background" args={["#0b0d14"]} />
-        <ambientLight intensity={0.3} />
-        <pointLight position={[10, 10, 10]} intensity={0.8} />
-        <pointLight position={[-10, -10, -10]} intensity={0.4} color="#4fd1ff" />
-        {/* Stars are a tiny shader effect; Environment HDR (~1 MB) was
-            slowing first paint by ~2s on the wire, and our materials don't
-            use reflective PBR maps, so we drop it. */}
+        <fog attach="fog" args={["#0b0d14", 36, 110]} />
+        <ambientLight intensity={0.35} />
+        <pointLight position={[10, 14, 10]} intensity={0.8} />
+        <pointLight position={[-12, -8, -12]} intensity={0.45} color="#4fd1ff" />
         <React.Suspense fallback={null}>
           <Stars
-            radius={120}
-            depth={60}
-            count={2200}
+            radius={140}
+            depth={70}
+            count={1800}
             factor={3}
             saturation={0}
             fade
-            speed={0.4}
+            speed={0.35}
           />
         </React.Suspense>
 
@@ -169,6 +282,10 @@ export function Scene3D({
             radius={info.radius}
             color={clusterColorMap[cid]}
             active={focusedCluster === cid}
+            dimmed={
+              Boolean(focusedCluster && focusedCluster !== cid) ||
+              Boolean(selectedTable && tableClusterOf[selectedTable] !== cid)
+            }
           />
         ))}
 
@@ -176,6 +293,11 @@ export function Scene3D({
           const from = positions[edge.from_table];
           const to = positions[edge.to_table];
           if (!from || !to) return null;
+          const highlighted = Boolean(
+            selectedTable &&
+              (edge.from_table === selectedTable ||
+                edge.to_table === selectedTable)
+          );
           const dimmed =
             (selectedTable &&
               edge.from_table !== selectedTable &&
@@ -191,6 +313,7 @@ export function Scene3D({
               to={to}
               color={clusterColorMap[cid] || "#a877ff"}
               dimmed={Boolean(dimmed)}
+              highlighted={highlighted}
             />
           );
         })}
@@ -216,9 +339,19 @@ export function Scene3D({
           enablePan
           enableZoom
           enableRotate
-          autoRotate={!selectedTable && !focusedCluster}
-          autoRotateSpeed={0.2}
+          enableDamping
+          dampingFactor={0.12}
+          minDistance={2}
+          maxDistance={120}
           makeDefault
+        />
+        <CameraController
+          selectedTable={selectedTable}
+          focusedCluster={focusedCluster}
+          positions={positions}
+          clusterCenters={clusterCenters}
+          resetToken={resetToken}
+          focusToken={focusToken}
         />
         <React.Suspense fallback={null}>
           <EffectComposer multisampling={0}>
@@ -230,8 +363,6 @@ export function Scene3D({
   );
 }
 
-// Local error boundary so a Three.js / WebGL crash doesn't take down the
-// whole design page. Falls back to a quiet placeholder + a button to reset.
 class SceneErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { hasError: boolean; error?: unknown }

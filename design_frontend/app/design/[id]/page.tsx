@@ -8,24 +8,24 @@ import {
   ArrowLeft,
   CheckCircle2,
   ChevronLeft,
-  ChevronRight,
   Compass,
+  Crosshair,
   Layers3,
   Loader2,
-  Map as MapIcon,
   RefreshCw,
   RotateCcw,
+  Search,
   Sparkles,
   Trash2,
   TriangleAlert,
-  XCircle
+  XCircle,
+  ZoomOut
 } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { QueryProvider } from "@/components/QueryProvider";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   critiqueDesign,
   deleteDesign,
@@ -45,12 +45,8 @@ import { DesignDiffPanel } from "@/components/panels/DesignDiffPanel";
 import { ClarificationCard } from "@/components/panels/ClarificationCard";
 import { DesignChat } from "@/components/chat/DesignChat";
 import { MiniMap } from "@/components/scene/MiniMap";
+import { ResizableRail } from "@/components/panels/ResizableRail";
 
-// R3F must run client-only. The dynamic `loading` prop covers chunk-fetch
-// time; once the chunk lands, Scene3D itself still needs a beat to init the
-// WebGL context + download the night HDR, so the Canvas may stay blank for
-// a moment. The shimmer below is rendered until React swaps in the real
-// Scene3D component.
 const Scene3D = dynamic(
   () => import("@/components/scene/Scene3D").then((m) => m.Scene3D),
   {
@@ -122,6 +118,11 @@ function DesignPageInner({ designId }: { designId: string }) {
   const [leftOpen, setLeftOpen] = React.useState(true);
   const [rightTab, setRightTab] = React.useState<RailTab>("activity");
   const [reviewBusy, setReviewBusy] = React.useState<string | null>(null);
+  const [tableSearch, setTableSearch] = React.useState("");
+
+  // Bumped to imperatively retarget the camera (locate, reset).
+  const [focusToken, setFocusToken] = React.useState(0);
+  const [resetToken, setResetToken] = React.useState(0);
 
   React.useEffect(() => {
     setDesignId(designId);
@@ -197,6 +198,37 @@ function DesignPageInner({ designId }: { designId: string }) {
       }
     }
   }, [phase, selection.kind, design]);
+
+  // When a table is picked from the minimap or cluster list, reframe the
+  // camera even if the selection was already that table.
+  const requestCameraFocus = React.useCallback(() => {
+    setFocusToken((n) => n + 1);
+  }, []);
+
+  const handlePickTableFromMap = React.useCallback(
+    (tableName: string) => {
+      setSelection({ kind: "table", tableName });
+      requestCameraFocus();
+    },
+    [setSelection, requestCameraFocus]
+  );
+
+  const handlePickCluster = React.useCallback(
+    (clusterId: string | undefined) => {
+      setFocusedCluster(clusterId);
+      // Clear table selection when switching clusters so camera frames
+      // the whole cluster cleanly.
+      setSelection({ kind: "none" });
+      requestCameraFocus();
+    },
+    [setFocusedCluster, setSelection, requestCameraFocus]
+  );
+
+  const handleResetView = React.useCallback(() => {
+    setSelection({ kind: "none" });
+    setFocusedCluster(undefined);
+    setResetToken((n) => n + 1);
+  }, [setSelection, setFocusedCluster]);
 
   async function handleDelete() {
     if (!confirm("Delete this design? This cannot be undone.")) return;
@@ -281,9 +313,12 @@ function DesignPageInner({ designId }: { designId: string }) {
             layout={layout}
             selectedTable={selectedTableName}
             focusedCluster={focusedCluster}
-            onSelectTable={(name) =>
-              setSelection({ kind: "table", tableName: name })
-            }
+            focusToken={focusToken}
+            resetToken={resetToken}
+            onSelectTable={(name) => {
+              setSelection({ kind: "table", tableName: name });
+              requestCameraFocus();
+            }}
             onClearSelection={() => setSelection({ kind: "none" })}
           />
         ) : (
@@ -296,18 +331,23 @@ function DesignPageInner({ designId }: { designId: string }) {
 
       {/* Top bar */}
       <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-4 p-4">
-        <div className="pointer-events-auto flex items-center gap-3 rounded-full border border-border bg-surface/80 px-3 py-1.5 backdrop-blur">
+        <div className="pointer-events-auto flex max-w-[min(60vw,560px)] items-center gap-3 rounded-full border border-border bg-surface/80 px-3 py-1.5 backdrop-blur">
           <Link
             href="/"
-            className="flex h-6 w-6 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
+            className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
           >
             <ArrowLeft className="h-4 w-4" />
           </Link>
-          <span className="text-sm font-medium tracking-tight">
+          <span
+            className="truncate whitespace-nowrap text-sm font-medium tracking-tight"
+            title={design?.domain_analysis?.domain_guess ?? "Schema design"}
+          >
             {design?.domain_analysis?.domain_guess ?? "Schema design"}
           </span>
           {design ? (
-            <span className="text-[11px] text-muted">· {tableCount} tables</span>
+            <span className="flex-shrink-0 whitespace-nowrap text-[11px] text-muted">
+              · {tableCount} tables
+            </span>
           ) : null}
           <PhaseChip phase={phase} />
         </div>
@@ -364,14 +404,18 @@ function DesignPageInner({ designId }: { designId: string }) {
         </div>
       </header>
 
-      {/* Left rail: clusters */}
+      {/* Left rail: clusters + table search/picker + minimap at bottom */}
       <aside
         className={cn(
           "pointer-events-auto absolute left-4 top-20 z-10 flex flex-col gap-2 rounded-2xl border border-border bg-surface/80 backdrop-blur",
-          leftOpen ? "w-[220px] p-3" : "w-12 items-center p-2"
+          leftOpen ? "w-[260px] p-3" : "w-12 items-center p-2"
         )}
         style={{ maxHeight: "calc(100vh - 6rem - 1rem)" }}
       >
+        {/* All the controls below this comment fit inside the rail; the
+            inner table-list takes the remaining vertical space and scrolls.
+            The minimap is pinned at the bottom of the rail so it never
+            visually conflicts with the table list or the 3D scene chrome. */}
         <button
           className="ml-auto flex h-6 w-6 items-center justify-center rounded-full text-muted hover:bg-surfaceAlt hover:text-text"
           onClick={() => setLeftOpen((o) => !o)}
@@ -383,57 +427,138 @@ function DesignPageInner({ designId }: { designId: string }) {
         </button>
         {leftOpen ? (
           <>
+            {/* Search field (always shown when expanded) */}
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted" />
+              <input
+                type="text"
+                value={tableSearch}
+                onChange={(e) => setTableSearch(e.target.value)}
+                placeholder="Search tables…"
+                className="w-full rounded-md border border-border bg-bg/40 py-1.5 pl-7 pr-2 text-xs outline-none placeholder:text-muted focus:border-accent"
+                data-testid="table-search"
+              />
+            </div>
+
             <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted">
               <Layers3 className="h-3 w-3 text-accent" />
-              Clusters
+              Clusters & tables
             </div>
-            <div className="flex flex-col gap-0.5 overflow-y-auto pr-1">
+            <div
+              className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1"
+              // maxHeight gives the list a deterministic scrollable area even
+              // when the surrounding flex column can't compute heights from
+              // its own maxHeight (the rail uses max-height not height).
+              style={{ maxHeight: "calc(100vh - 6rem - 1rem - 220px)" }}
+            >
               <button
                 className={cn(
                   "rounded-md px-2 py-1 text-left text-xs hover:bg-surfaceAlt",
                   !focusedCluster && "bg-accent/15 text-accent"
                 )}
-                onClick={() => setFocusedCluster(undefined)}
+                onClick={() => handlePickCluster(undefined)}
               >
                 All{" "}
                 <span className="text-[10px] text-muted">
                   · {clusters.length} clusters / {tableCount} tables
                 </span>
               </button>
-              {clusters.map((c) => (
-                <button
-                  key={c.cluster_id}
-                  className={cn(
-                    "rounded-md px-2 py-1 text-left text-xs hover:bg-surfaceAlt",
-                    focusedCluster === c.cluster_id &&
-                      "bg-accent/15 text-accent"
-                  )}
-                  onClick={() => setFocusedCluster(c.cluster_id)}
-                  title={c.rationale}
-                >
-                  <span className="block truncate">
-                    {c.name || c.cluster_id}
-                  </span>
-                  <span className="text-[10px] text-muted">
-                    {c.table_names.length} tables
-                  </span>
-                </button>
-              ))}
+              {clusters.map((c) => {
+                const filtered = tableSearch
+                  ? c.table_names.filter((tn) =>
+                      tn.toLowerCase().includes(tableSearch.toLowerCase())
+                    )
+                  : c.table_names;
+                if (tableSearch && filtered.length === 0) return null;
+                const isActive = focusedCluster === c.cluster_id;
+                return (
+                  <div
+                    key={c.cluster_id}
+                    className="flex flex-col gap-0.5"
+                  >
+                    <button
+                      className={cn(
+                        "flex items-center justify-between gap-1 rounded-md px-2 py-1 text-left text-xs hover:bg-surfaceAlt",
+                        isActive && "bg-accent/15 text-accent"
+                      )}
+                      onClick={() => handlePickCluster(c.cluster_id)}
+                      title={c.rationale}
+                    >
+                      <span className="truncate">
+                        {c.name || c.cluster_id}
+                      </span>
+                      <span className="ml-1 flex-shrink-0 text-[10px] text-muted">
+                        {filtered.length}
+                      </span>
+                    </button>
+                    {/* Table rows: show when search active OR cluster is focused */}
+                    {(tableSearch || isActive) && filtered.length > 0 ? (
+                      <ul className="ml-3 flex flex-col gap-px border-l border-border/70 pl-2">
+                        {filtered.map((tn) => {
+                          const sel = tn === selectedTableName;
+                          return (
+                            <li key={tn}>
+                              <button
+                                data-testid={`table-row-${tn}`}
+                                data-table={tn}
+                                onClick={() => handlePickTableFromMap(tn)}
+                                className={cn(
+                                  "block w-full truncate rounded-sm px-1.5 py-0.5 text-left font-mono text-[11px] hover:bg-surfaceAlt",
+                                  sel ? "bg-accent/20 text-accent" : "text-text/90"
+                                )}
+                                title={`Focus camera on ${tn}`}
+                              >
+                                {tn}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    ) : null}
+                  </div>
+                );
+              })}
               {clusters.length === 0 ? (
                 <div className="px-2 py-1 text-[11px] text-muted">
                   No clusters yet.
                 </div>
               ) : null}
+              {tableSearch &&
+              clusters.every(
+                (c) =>
+                  c.table_names.filter((tn) =>
+                    tn.toLowerCase().includes(tableSearch.toLowerCase())
+                  ).length === 0
+              ) ? (
+                <div className="px-2 py-2 text-[11px] text-muted">
+                  No tables match &quot;{tableSearch}&quot;.
+                </div>
+              ) : null}
             </div>
+            {/* Minimap pinned at the bottom of the left rail */}
+            {design ? (
+              <div className="mt-1 border-t border-border/60 pt-2">
+                <MiniMap
+                  layout={layout}
+                  selectedTable={selectedTableName}
+                  focusedCluster={focusedCluster}
+                  onPickTable={handlePickTableFromMap}
+                />
+              </div>
+            ) : null}
           </>
         ) : (
           <Layers3 className="mt-1 h-4 w-4 text-accent" />
         )}
       </aside>
 
-      {/* Right rail: contextual (tabs OR table/field inspector) */}
-      <aside
-        className="pointer-events-auto absolute right-4 top-20 z-10 flex w-[380px] flex-col overflow-hidden rounded-2xl border border-border bg-surface/85 backdrop-blur"
+      {/* Right rail: contextual (tabs OR table/field inspector) — resizable */}
+      <ResizableRail
+        storageKey="cockpit_right_rail_width"
+        defaultWidth={400}
+        minWidth={340}
+        maxWidth={760}
+        className="absolute right-4 top-20 z-10"
         style={{ maxHeight: "calc(100vh - 6rem - 1rem)" }}
       >
         {inspectorOpen ? (
@@ -455,7 +580,7 @@ function DesignPageInner({ designId }: { designId: string }) {
               <div className="text-xs uppercase tracking-wider text-muted">
                 {selection.kind === "field" ? "Field" : "Table"}
               </div>
-              <span className="font-mono text-sm">
+              <span className="truncate font-mono text-sm">
                 {selection.kind === "field"
                   ? `${selection.tableName}.${selection.fieldName}`
                   : selectedTable?.table_name}
@@ -472,6 +597,7 @@ function DesignPageInner({ designId }: { designId: string }) {
               ) : selectedTable ? (
                 <TableInspector
                   table={selectedTable}
+                  onLocate={requestCameraFocus}
                   onSelectField={(fieldName) =>
                     setSelection({
                       kind: "field",
@@ -555,21 +681,37 @@ function DesignPageInner({ designId }: { designId: string }) {
             </div>
           </>
         )}
-      </aside>
+      </ResizableRail>
 
-      {/* Mini-map */}
-      {design ? (
-        <div className="pointer-events-auto absolute bottom-4 right-4 z-10">
-          <MiniMap
-            layout={layout}
-            selectedTable={selectedTableName}
-            focusedCluster={focusedCluster}
-          />
+      {/* Bottom-LEFT controls: chat + reset + locate (minimap now lives in
+          the left rail so it doesn't fight the rail for vertical space). */}
+      <div className="pointer-events-none absolute bottom-4 left-4 z-20 flex items-center gap-2">
+        <div className="pointer-events-auto flex items-center gap-2">
+          <DesignChat designId={designId} />
+          {design ? (
+            <>
+              <button
+                onClick={handleResetView}
+                className="inline-flex h-9 items-center gap-1.5 rounded-full border border-border bg-surface/85 px-3 text-xs font-medium text-muted backdrop-blur hover:bg-surfaceAlt hover:text-text"
+                title="Reset camera"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+                Reset view
+              </button>
+              {selectedTableName ? (
+                <button
+                  onClick={requestCameraFocus}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-3 text-xs font-medium text-accent backdrop-blur hover:bg-accent/20"
+                  title="Re-frame the selected table"
+                >
+                  <Crosshair className="h-3.5 w-3.5" />
+                  Locate
+                </button>
+              ) : null}
+            </>
+          ) : null}
         </div>
-      ) : null}
-
-      {/* Floating chat (bottom-left so it doesn't fight the minimap) */}
-      <DesignChat designId={designId} />
+      </div>
 
       {/* Clarification modal — centered, impossible to miss */}
       <AnimatePresence>
